@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kballard/go-shellquote"
@@ -80,14 +82,17 @@ type App struct {
 	httpClient *http.Client
 	itunes     *itunes.Client
 
-	commands map[string]*command
-	helpList []*command
+	commands    map[string]*command
+	helpList    []*command
+	sleep       sleepFunc
+	downloadMgr *downloadManager
 }
 
 // Dependencies captures optional external dependencies for App construction.
 type Dependencies struct {
 	HTTPClient *http.Client
 	ITunes     *itunes.Client
+	Sleep      sleepFunc
 }
 
 // CommandResult captures the outcome of executing a command.
@@ -111,6 +116,10 @@ func NewWithDependencies(cfg config.Config, configPath string, db *sql.DB, deps 
 	if itunesClient == nil {
 		itunesClient = itunes.NewClient(httpClient, "")
 	}
+	sleeper := deps.Sleep
+	if sleeper == nil {
+		sleeper = defaultSleep
+	}
 
 	application := &App{
 		config:     cfg,
@@ -120,14 +129,31 @@ func NewWithDependencies(cfg config.Config, configPath string, db *sql.DB, deps 
 		itunes:     itunesClient,
 		commands:   make(map[string]*command),
 		helpList:   make([]*command, 0, 16),
+		sleep:      sleeper,
 	}
 	application.registerCommands()
+	workers := cfg.ParallelDownloads
+	if workers < 0 {
+		workers = 0
+	}
+	if workers > 0 {
+		application.downloadMgr = newDownloadManager(application, workers)
+		application.downloadMgr.Notify()
+	}
 	return application
 }
 
 // Config returns a copy of the active configuration.
 func (a *App) Config() config.Config {
 	return a.config
+}
+
+// Close releases background resources associated with the App.
+func (a *App) Close() error {
+	if a.downloadMgr != nil {
+		a.downloadMgr.Stop()
+	}
+	return nil
 }
 
 // Execute processes a single REPL command string.
@@ -742,26 +768,39 @@ func (a *App) fetchEpisodeInfo(ctx context.Context, episodeID string) (episodeIn
 }
 
 func (a *App) enqueueEpisode(ctx context.Context, episodeID string) error {
-	tx, err := a.db.BeginTx(ctx, nil)
+	err := withRetry(ctx, func() error {
+		tx, err := a.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback()
+			}
+		}()
+
+		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, retry_count = 0 WHERE id = ?", stateQueued, episodeID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO downloads (episode_id, enqueued_at, priority)
+                VALUES (?, ?, 0)
+                ON CONFLICT(episode_id) DO UPDATE SET enqueued_at = excluded.enqueued_at`, episodeID, time.Now().UTC()); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	if _, err = tx.ExecContext(ctx, "UPDATE episodes SET state = ?, retry_count = 0 WHERE id = ?", stateQueued, episodeID); err != nil {
-		return err
+	if a.downloadMgr != nil {
+		a.downloadMgr.Notify()
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO downloads (episode_id, enqueued_at, priority)
-                VALUES (?, ?, 0)
-                ON CONFLICT(episode_id) DO UPDATE SET enqueued_at = excluded.enqueued_at`, episodeID, time.Now().UTC()); err != nil {
-		return err
-	}
-	err = tx.Commit()
-	return err
+	return nil
 }
 
 func (a *App) downloadEpisode(ctx context.Context, info episodeInfo) (string, error) {
@@ -776,61 +815,45 @@ func (a *App) downloadEpisode(ctx context.Context, info episodeInfo) (string, er
 		return "", err
 	}
 
-	tempFile, err := os.CreateTemp(a.config.TmpDir, "podsink-download-*")
-	if err != nil {
-		return "", err
-	}
-	tempName := tempFile.Name()
-	defer func() {
-		tempFile.Close()
-		os.Remove(tempName)
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.EnclosureURL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("download episode: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download failed: %s", resp.Status)
+	attempts := a.config.RetryCount + 1
+	if attempts <= 0 {
+		attempts = 1
 	}
 
-	if _, err := io.Copy(tempFile, resp.Body); err != nil {
-		return "", err
-	}
-	if err := tempFile.Close(); err != nil {
-		return "", err
+	partialPath := a.episodePartialPath(info)
+	var attemptErr error
+	for i := 0; i < attempts; i++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
+		resultPath, err := a.downloadOnce(ctx, info, finalPath, partialPath)
+		if err == nil {
+			return resultPath, nil
+		}
+
+		attemptErr = err
+		if err := a.incrementRetryCount(ctx, info.ID); err != nil {
+			return "", err
+		}
+
+		if i == attempts-1 {
+			break
+		}
+
+		backoff := time.Second << i
+		maxBackoff := time.Duration(a.config.RetryBackoffMaxSec) * time.Second
+		if maxBackoff > 0 && backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		if backoff > 0 {
+			if err := a.sleep(ctx, backoff); err != nil {
+				return "", err
+			}
+		}
 	}
 
-	if err := os.Remove(finalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	if err := os.Rename(tempName, finalPath); err != nil {
-		return "", err
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", err
-	}
-	if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, downloaded_at = ?, file_path = ?, retry_count = 0 WHERE id = ?", stateDownloaded, now, finalPath, info.ID); err != nil {
-		tx.Rollback()
-		return "", err
-	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", info.ID); err != nil {
-		tx.Rollback()
-		return "", err
-	}
-	if err := tx.Commit(); err != nil {
-		return "", err
-	}
-
-	return finalPath, nil
+	return "", attemptErr
 }
 
 func (a *App) updateEpisodeState(ctx context.Context, episodeID, state string) error {
@@ -841,6 +864,47 @@ func (a *App) updateEpisodeState(ctx context.Context, episodeID, state string) e
 func (a *App) removeFromQueue(ctx context.Context, episodeID string) error {
 	_, err := a.db.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID)
 	return err
+}
+
+func (a *App) requeueEpisode(ctx context.Context, episodeID string) error {
+	err := withRetry(ctx, func() error {
+		_, err := a.db.ExecContext(ctx, `INSERT INTO downloads (episode_id, enqueued_at, priority)
+                VALUES (?, ?, 0)
+                ON CONFLICT(episode_id) DO UPDATE SET enqueued_at = excluded.enqueued_at`, episodeID, time.Now().UTC())
+		return err
+	})
+	if err == nil && a.downloadMgr != nil {
+		a.downloadMgr.Notify()
+	}
+	return err
+}
+
+func (a *App) persistDownloadResult(ctx context.Context, episodeID, finalPath string) error {
+	return withRetry(ctx, func() error {
+		tx, err := a.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback()
+			}
+		}()
+
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, downloaded_at = ?, file_path = ?, retry_count = 0 WHERE id = ?", stateDownloaded, now, finalPath, episodeID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
 }
 
 func (a *App) episodeFilePath(info episodeInfo) (string, error) {
@@ -861,6 +925,334 @@ func (a *App) episodeFilePath(info episodeInfo) (string, error) {
 	}
 	ext := fileExtension(info.EnclosureURL)
 	return filepath.Join(root, podcastName, episodeName+ext), nil
+}
+
+func (a *App) episodePartialPath(info episodeInfo) string {
+	name := safeFilename(info.ID)
+	if name == "" {
+		name = safeFilename(info.Title)
+	}
+	if name == "" {
+		name = "episode"
+	}
+	return filepath.Join(a.config.TmpDir, fmt.Sprintf("podsink-%s.partial", name))
+}
+
+func (a *App) downloadOnce(ctx context.Context, info episodeInfo, finalPath, partialPath string) (string, error) {
+	file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	stat, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	existingSize := stat.Size()
+	if _, err := file.Seek(existingSize, io.SeekStart); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.EnclosureURL, nil)
+	if err != nil {
+		return "", err
+	}
+	if ua := strings.TrimSpace(a.config.UserAgent); ua != "" {
+		req.Header.Set("User-Agent", ua)
+	}
+	if existingSize > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download episode: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+		if existingSize > 0 {
+			if err := file.Truncate(0); err != nil {
+				return "", err
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				return "", err
+			}
+		}
+	case http.StatusPartialContent:
+	default:
+		return "", fmt.Errorf("download failed: %s", resp.Status)
+	}
+
+	if _, err := io.Copy(file, resp.Body); err != nil {
+		return "", err
+	}
+	if err := file.Sync(); err != nil {
+		return "", err
+	}
+	if err := file.Close(); err != nil {
+		return "", err
+	}
+
+	if err := moveFile(partialPath, finalPath); err != nil {
+		return "", err
+	}
+
+	if err := a.persistDownloadResult(ctx, info.ID, finalPath); err != nil {
+		return "", err
+	}
+
+	return finalPath, nil
+}
+
+func moveFile(src, dst string) error {
+	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		var linkErr *os.LinkError
+		if errors.As(err, &linkErr) && linkErr.Err == syscall.EXDEV {
+			in, err := os.Open(src)
+			if err != nil {
+				return err
+			}
+			defer in.Close()
+
+			out, err := os.Create(dst)
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(out, in); err != nil {
+				out.Close()
+				return err
+			}
+			if err := out.Close(); err != nil {
+				return err
+			}
+			if err := os.Remove(src); err != nil {
+				return err
+			}
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (a *App) incrementRetryCount(ctx context.Context, episodeID string) error {
+	_, err := a.db.ExecContext(ctx, "UPDATE episodes SET retry_count = retry_count + 1 WHERE id = ?", episodeID)
+	return err
+}
+
+var errNoDownloadTask = errors.New("no download task available")
+
+type downloadManager struct {
+	app    *App
+	wakeCh chan struct{}
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+func newDownloadManager(app *App, workers int) *downloadManager {
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := &downloadManager{
+		app:    app,
+		wakeCh: make(chan struct{}, workers*2),
+		cancel: cancel,
+	}
+	for i := 0; i < workers; i++ {
+		manager.wg.Add(1)
+		go manager.worker(ctx)
+	}
+	return manager
+}
+
+func (m *downloadManager) Notify() {
+	if m == nil {
+		return
+	}
+	select {
+	case m.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *downloadManager) Stop() {
+	if m == nil {
+		return
+	}
+	m.cancel()
+	m.Notify()
+	m.wg.Wait()
+}
+
+func (m *downloadManager) worker(ctx context.Context) {
+	defer m.wg.Done()
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		episodeID, err := m.claimNext(ctx)
+		if err != nil {
+			if errors.Is(err, errNoDownloadTask) {
+				if err := m.waitForWork(ctx); err != nil {
+					return
+				}
+				continue
+			}
+			log.Printf("download queue claim failed: %v", err)
+			if err := waitWithContext(ctx, time.Second); err != nil {
+				return
+			}
+			continue
+		}
+
+		info, err := m.app.fetchEpisodeInfo(ctx, episodeID)
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("download queue fetch info %s: %v", episodeID, err)
+			}
+			continue
+		}
+		if strings.TrimSpace(info.EnclosureURL) == "" {
+			log.Printf("episode %s missing enclosure URL", episodeID)
+			continue
+		}
+		if _, err := m.app.downloadEpisode(ctx, info); err != nil {
+			log.Printf("download %s failed: %v", episodeID, err)
+			if err := m.app.requeueEpisode(ctx, episodeID); err != nil {
+				log.Printf("requeue %s failed: %v", episodeID, err)
+			}
+		}
+	}
+}
+
+func (m *downloadManager) waitForWork(ctx context.Context) error {
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-m.wakeCh:
+		return nil
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (m *downloadManager) claimNext(ctx context.Context) (string, error) {
+	var episodeID string
+	err := withRetry(ctx, func() error {
+		tx, err := m.app.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				tx.Rollback()
+			}
+		}()
+
+		episodeID = ""
+		err = tx.QueryRowContext(ctx, `SELECT episode_id FROM downloads ORDER BY priority DESC, enqueued_at LIMIT 1`).Scan(&episodeID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return errNoDownloadTask
+			}
+			return err
+		}
+
+		res, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return errNoDownloadTask
+		}
+
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return episodeID, nil
+}
+
+func withRetry(ctx context.Context, fn func() error) error {
+	const attempts = 5
+	var err error
+	for i := 0; i < attempts; i++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err = fn()
+		if err == nil {
+			return nil
+		}
+		if errors.Is(err, errNoDownloadTask) {
+			return err
+		}
+		if !isSQLiteBusy(err) {
+			return err
+		}
+		backoff := 50 * time.Millisecond * time.Duration(1<<i)
+		if err := waitWithContext(ctx, backoff); err != nil {
+			return err
+		}
+	}
+	return err
+}
+
+func waitWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
+}
+
+type sleepFunc func(context.Context, time.Duration) error
+
+func defaultSleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func safeFilename(value string) string {
