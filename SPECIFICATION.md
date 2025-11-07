@@ -38,10 +38,10 @@ Production-ready v1.0.
 9. **Concurrent Downloads** with configurable concurrency and retry logic.
 
 ### REPL Interface
-- Prompt: `podsink>`
+- Default Prompt: `podsink>`
 - Autocomplete and inline help.
 - Commands:
-  - `search [query]`
+  - `search` - enters search mode (prompt changes to `search>`)
   - `list subscriptions`
   - `episodes` (aliases: `e`, `le`)
   - `queue [episode_id]`
@@ -138,7 +138,9 @@ Failures are logged but do not alter persistent state.
 - Keyboard shortcuts: ↑↓ navigation, space toggle, Enter select, `d` download, `i` ignore.
 
 ### Search & Subscribe Flow
-After running `search <query>` or `list subscriptions`, an interactive list of podcasts is displayed:
+The `search` command (or `[s]` shortcut from the main menu) enters **search input mode**, where the prompt changes to `search>`. The user types their search query and presses Enter to execute the search. Press `Esc` to exit search mode without searching.
+
+After executing a search or running `list subscriptions`, an interactive list of podcasts is displayed:
 
 **List View:**
 - Navigate with ↑↓ or j/k keys
@@ -189,7 +191,10 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
 - Creates config and DB automatically.
 
 ### Search
-- `search "term"` completes within 5s using iTunes API.
+- `search` command (or `[s]` shortcut) enters search input mode with `search>` prompt.
+- User types query and presses Enter to execute search (completes within 5s using iTunes API).
+- Press `Esc` to exit search input mode without searching.
+- If query is empty, an error message is displayed.
 - Interactive list displays results with subscription status.
 - Pressing `Enter` on a result shows podcast details.
 - Pressing `s` subscribes to the podcast:

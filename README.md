@@ -55,10 +55,11 @@ Configuration files created:
 Once in the REPL, you can use the following commands:
 
 ```
-podsink> search golang
-# An interactive list appears. Use ↑↓/jk to navigate results, Enter for details,
-# press "s" to subscribe, or "u" to unsubscribe. The same view is used when
-# browsing your subscriptions.
+podsink> search
+search> golang
+# Enter search mode, type your query, and press Enter. An interactive list appears.
+# Use ↑↓/jk to navigate results, Enter for details, press "s" to subscribe,
+# or "u" to unsubscribe. The same view is used when browsing your subscriptions.
 
 podsink> list subscriptions
 # Shows all subscribed podcasts in the interactive list. Use "u" to unsubscribe
@@ -77,7 +78,7 @@ podsink> help
 Available commands:
   help [command]              Show information about available commands
   config [show]               View or edit application configuration
-  search <query>              Search for podcasts via the iTunes API
+  search                      Search for podcasts via the iTunes API (enters search mode)
   list subscriptions          List all podcast subscriptions
   episodes                    View recent episodes across subscriptions (aliases: e, le)
   queue <episode_id>          Queue an episode for download
@@ -93,7 +94,7 @@ flags `--import-opml <file>` or `--export-opml <file>`.
 
 ### Discovery & Subscription Management
 
-- `search <query>` - Search for podcasts using iTunes API (interactive results support subscribing/unsubscribing)
+- `search` - Enter search mode with `search>` prompt; type query and press Enter to search for podcasts using iTunes API (interactive results support subscribing/unsubscribing)
 - `list subscriptions` - Browse all subscriptions in the interactive list (unsubscribe directly or open details)
 
 ### Episode Management

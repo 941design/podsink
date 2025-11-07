@@ -331,7 +331,7 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 	return CommandResult{
 		SearchResults: searchResults,
 		SearchTitle:   "Search Results",
-		SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x]/Esc to exit",
+		SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x]/Esc to search again",
 		SearchContext: "search",
 	}, nil
 }

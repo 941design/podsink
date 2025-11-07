@@ -45,6 +45,19 @@ type episodeDetailView struct {
 	lines  []string
 }
 
+type commandMenuItem struct {
+	name        string
+	usage       string
+	description string
+	shorthand   string
+}
+
+type commandMenuView struct {
+	active bool
+	items  []commandMenuItem
+	cursor int
+}
+
 type model struct {
 	ctx           context.Context
 	app           *app.App
@@ -57,8 +70,10 @@ type model struct {
 	theme         theme.Theme
 	width         int
 
-	search   searchView
-	episodes episodeView
+	searchInputMode bool // When true, prompt changes to "search> " and input is treated as search query
+	commandMenu     commandMenuView
+	search          searchView
+	episodes        episodeView
 
 	longDescCache map[string]string
 }
@@ -68,10 +83,22 @@ func newModel(ctx context.Context, application *app.App) model {
 	th := theme.ForName(cfg.ColorTheme)
 	ti := textinput.New()
 	ti.Placeholder = "help"
-	ti.Focus()
+	ti.Blur() // Start with menu, not input
 	ti.Prompt = "podsink> "
 	ti.CharLimit = 512
 	ti.Width = 80
+
+	// Build command menu items (excluding help, import, export)
+	commandItems := []commandMenuItem{
+		{name: "search", usage: "search", description: "Search for podcasts via the iTunes API", shorthand: "[s]"},
+		{name: "list", usage: "podcasts", description: "List all podcast subscriptions", shorthand: "[p]"},
+		{name: "episodes", usage: "episodes", description: "View recent episodes across subscriptions", shorthand: "[e]"},
+		{name: "queue", usage: "queue <episode_id>", description: "Queue an episode for download", shorthand: ""},
+		{name: "download", usage: "download <episode_id>", description: "Download an episode immediately", shorthand: ""},
+		{name: "ignore", usage: "ignore <episode_id>", description: "Toggle the ignored state for an episode", shorthand: ""},
+		{name: "config", usage: "config [show]", description: "View or edit application configuration", shorthand: "[c]"},
+		{name: "exit", usage: "exit", description: "Exit the application", shorthand: "[x]"},
+	}
 
 	return model{
 		ctx:     ctx,
@@ -81,6 +108,11 @@ func newModel(ctx context.Context, application *app.App) model {
 		theme:   th,
 		messages: []string{
 			th.Message.Render("Podsink CLI ready. Type 'help' for assistance."),
+		},
+		commandMenu: commandMenuView{
+			active: true,
+			items:  commandItems,
+			cursor: 0,
 		},
 		longDescCache: make(map[string]string),
 	}
@@ -101,6 +133,113 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		// Handle command menu mode navigation
+		if m.commandMenu.active {
+			switch msg.String() {
+			case "ctrl+c", "esc", "x":
+				m.quitting = true
+				return m, tea.Quit
+			case "up", "k":
+				// Move cursor up with wraparound
+				if m.commandMenu.cursor > 0 {
+					m.commandMenu.cursor--
+				} else {
+					m.commandMenu.cursor = len(m.commandMenu.items) - 1
+				}
+				return m, nil
+			case "down", "j":
+				// Move cursor down with wraparound
+				if m.commandMenu.cursor < len(m.commandMenu.items)-1 {
+					m.commandMenu.cursor++
+				} else {
+					m.commandMenu.cursor = 0
+				}
+				return m, nil
+			case "enter":
+				// Execute selected command
+				if m.commandMenu.cursor < len(m.commandMenu.items) {
+					selectedItem := m.commandMenu.items[m.commandMenu.cursor]
+					m.commandMenu.active = false
+					m.input.Focus()
+
+					// For commands that need arguments, prompt for input
+					switch selectedItem.name {
+					case "search":
+						// Enter search input mode
+						m.searchInputMode = true
+						m.input.Prompt = "search> "
+						m.input.Placeholder = "Enter podcast search query..."
+						m.input.SetValue("")
+						m.input.SetCursor(0)
+						return m, nil
+					case "list":
+						// Execute "list subscriptions" directly
+						result, err := m.app.Execute(m.ctx, "list subscriptions")
+						if err != nil {
+							m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+							return m, nil
+						}
+						return m.handleCommandResult(result)
+					case "queue", "download", "ignore":
+						// Prompt for episode ID
+						m.input.SetValue(selectedItem.name + " ")
+						m.input.SetCursor(len(selectedItem.name + " "))
+						return m, nil
+					default:
+						// Execute the command directly
+						result, err := m.app.Execute(m.ctx, selectedItem.name)
+						if err != nil {
+							m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+							return m, nil
+						}
+						return m.handleCommandResult(result)
+					}
+				}
+				return m, nil
+			case "s":
+				// Shortcut for search - enter search input mode
+				m.commandMenu.active = false
+				m.searchInputMode = true
+				m.input.Focus()
+				m.input.Prompt = "search> "
+				m.input.Placeholder = "Enter podcast search query..."
+				m.input.SetValue("")
+				m.input.SetCursor(0)
+				return m, nil
+			case "p":
+				// Shortcut for list podcasts
+				m.commandMenu.active = false
+				m.input.Focus()
+				result, err := m.app.Execute(m.ctx, "list subscriptions")
+				if err != nil {
+					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "e":
+				// Shortcut for episodes
+				m.commandMenu.active = false
+				m.input.Focus()
+				result, err := m.app.Execute(m.ctx, "episodes")
+				if err != nil {
+					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "c":
+				// Shortcut for config
+				m.commandMenu.active = false
+				m.input.Focus()
+				result, err := m.app.Execute(m.ctx, "config")
+				if err != nil {
+					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			}
+			return m, nil
+		}
+
 		// Handle search details mode navigation
 		if m.search.details.active {
 			switch msg.String() {
@@ -170,14 +309,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 			case "esc", "q", "x":
-				// Exit search mode
+				// Exit search mode - return to main menu
 				m.search.active = false
 				m.search.results = nil
 				m.search.title = ""
 				m.search.hint = ""
 				m.search.context = ""
 				m.search.details = detailView{}
-				m.input.Focus()
+				m.commandMenu.active = true
+				m.input.Blur()
 				return m, nil
 			case "up", "k":
 				if m.search.cursor > 0 {
@@ -227,13 +367,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 			case "esc", "q", "x":
-				// Exit episode mode
+				// Exit episode mode - return to main menu
 				m.episodes.active = false
 				m.episodes.results = nil
 				m.episodes.details.active = false
 				m.episodes.cursor = 0
 				m.episodes.scroll = 0
-				m.input.Focus()
+				m.commandMenu.active = true
+				m.input.Blur()
 				return m, nil
 			case "enter":
 				if m.episodes.cursor < len(m.episodes.results) {
@@ -277,6 +418,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
+		// Handle search input mode
+		if m.searchInputMode {
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				m.quitting = true
+				return m, tea.Quit
+			case tea.KeyEsc:
+				// Exit search input mode - return to main menu
+				m.searchInputMode = false
+				m.input.Prompt = "podsink> "
+				m.input.Placeholder = "help"
+				m.input.SetValue("")
+				m.commandMenu.active = true
+				m.input.Blur()
+				return m, nil
+			case tea.KeyEnter:
+				// Execute search with the query
+				query := strings.TrimSpace(m.input.Value())
+				m.searchInputMode = false
+				m.input.Prompt = "podsink> "
+				m.input.Placeholder = "help"
+				m.input.SetValue("")
+
+				if query == "" {
+					// Empty query returns to main menu
+					m.commandMenu.active = true
+					m.input.Blur()
+					return m, nil
+				}
+
+				result, err := m.app.Execute(m.ctx, "search "+query)
+				if err != nil {
+					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			}
+			// Let the input handle other keys
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return m, cmd
+		}
+
 		// Normal mode key handling
 		switch msg.Type {
 		case tea.KeyCtrlC:
@@ -301,6 +485,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	// If in command menu mode, render the menu
+	if m.commandMenu.active {
+		return m.renderCommandMenu()
+	}
+
 	// If in details mode, render the podcast details
 	if m.search.details.active {
 		return m.renderSearchDetails()
@@ -333,23 +522,7 @@ func (m model) View() string {
 	return b.String()
 }
 
-func (m model) handleSubmit() (tea.Model, tea.Cmd) {
-	command := strings.TrimSpace(m.input.Value())
-	if command != "" {
-		m.history = append(m.history, command)
-	}
-	m.input.SetValue("")
-
-	if command == "" {
-		return m, nil
-	}
-
-	result, err := m.app.Execute(m.ctx, command)
-	if err != nil {
-		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
-		return m, nil
-	}
-
+func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd) {
 	// Check if we got interactive search results
 	if len(result.SearchResults) > 0 {
 		m.search.active = true
@@ -385,6 +558,26 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) handleSubmit() (tea.Model, tea.Cmd) {
+	command := strings.TrimSpace(m.input.Value())
+	if command != "" {
+		m.history = append(m.history, command)
+	}
+	m.input.SetValue("")
+
+	if command == "" {
+		return m, nil
+	}
+
+	result, err := m.app.Execute(m.ctx, command)
+	if err != nil {
+		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+		return m, nil
+	}
+
+	return m.handleCommandResult(result)
 }
 
 func (m model) handleTabComplete() (tea.Model, tea.Cmd) {
@@ -988,4 +1181,42 @@ func wrapLine(line string, width int) []string {
 	}
 
 	return result
+}
+
+func (m model) renderCommandMenu() string {
+	var b strings.Builder
+
+	headerStyle := m.theme.Header
+	cursorStyle := m.theme.Cursor
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+
+	b.WriteString(headerStyle.Render("Podsink - Podcast Manager"))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [c]onfig, ESC/[x] to exit"))
+	b.WriteString("\n\n")
+
+	for i, item := range m.commandMenu.items {
+		cursor := "  "
+		style := normalStyle
+
+		if i == m.commandMenu.cursor {
+			cursor = "→ "
+			style = cursorStyle
+		}
+
+		// Format: → [s] search <query> - Search for podcasts
+		shorthand := item.shorthand
+		if shorthand == "" {
+			shorthand = "   "
+		} else {
+			shorthand = shorthand + " "
+		}
+
+		line := cursor + dimStyle.Render(shorthand) + style.Render(item.usage)
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	return b.String()
 }
