@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +28,7 @@ import (
 	"podsink/internal/config"
 	"podsink/internal/feeds"
 	"podsink/internal/itunes"
+	"podsink/internal/opml"
 )
 
 type commandHandler func(context.Context, []string) (CommandResult, error)
@@ -70,6 +74,7 @@ type episodeInfo struct {
 	HasPublish   bool
 	FilePath     string
 	EnclosureURL string
+	Hash         string
 	PodcastID    string
 	PodcastTitle string
 }
@@ -110,7 +115,20 @@ func New(cfg config.Config, configPath string, db *sql.DB) *App {
 func NewWithDependencies(cfg config.Config, configPath string, db *sql.DB, deps Dependencies) *App {
 	httpClient := deps.HTTPClient
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		transport := &http.Transport{
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: !cfg.TLSVerify,
+			},
+		}
+		if proxyURL := strings.TrimSpace(cfg.Proxy); proxyURL != "" {
+			if parsed, err := url.Parse(proxyURL); err == nil {
+				transport.Proxy = http.ProxyURL(parsed)
+			}
+		}
+		httpClient = &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: transport,
+		}
 	}
 	itunesClient := deps.ITunes
 	if itunesClient == nil {
@@ -146,6 +164,15 @@ func NewWithDependencies(cfg config.Config, configPath string, db *sql.DB, deps 
 // Config returns a copy of the active configuration.
 func (a *App) Config() config.Config {
 	return a.config
+}
+
+// CommandNames returns a list of all registered command names (including aliases).
+func (a *App) CommandNames() []string {
+	names := make([]string, 0, len(a.commands))
+	for name := range a.commands {
+		names = append(names, name)
+	}
+	return names
 }
 
 // Close releases background resources associated with the App.
@@ -299,6 +326,8 @@ func (a *App) registerCommands() {
 	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
 	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
 	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
+	a.registerCommand("export", "export <file_path>", "Export subscriptions to OPML file", a.exportCommand)
+	a.registerCommand("import", "import <file_path>", "Import subscriptions from OPML file", a.importCommand)
 }
 
 func (a *App) registerCommand(name, usage, summary string, handler commandHandler, aliases ...string) {
@@ -489,6 +518,9 @@ func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, e
 		return CommandResult{}, err
 	}
 
+	if info.State == stateDownloaded {
+		return CommandResult{Message: fmt.Sprintf("Episode %s queued for re-download.", info.ID)}, nil
+	}
 	return CommandResult{Message: fmt.Sprintf("Episode %s queued for download.", info.ID)}, nil
 }
 
@@ -515,11 +547,15 @@ func (a *App) downloadCommand(ctx context.Context, args []string) (CommandResult
 		return CommandResult{Message: "Episode is ignored. Unignore before downloading."}, nil
 	}
 
+	isRedownload := info.State == stateDownloaded
 	finalPath, err := a.downloadEpisode(ctx, info)
 	if err != nil {
 		return CommandResult{}, err
 	}
 
+	if isRedownload {
+		return CommandResult{Message: fmt.Sprintf("Re-downloaded %s to %s.", info.Title, finalPath)}, nil
+	}
 	return CommandResult{Message: fmt.Sprintf("Downloaded %s to %s.", info.Title, finalPath)}, nil
 }
 
@@ -555,6 +591,147 @@ func (a *App) ignoreCommand(ctx context.Context, args []string) (CommandResult, 
 		}
 		return CommandResult{Message: fmt.Sprintf("Episode %s ignored.", info.ID)}, nil
 	}
+}
+
+func (a *App) exportCommand(ctx context.Context, args []string) (CommandResult, error) {
+	if len(args) != 1 {
+		return CommandResult{Message: "Usage: export <file_path>"}, nil
+	}
+	filePath := strings.TrimSpace(args[0])
+	if filePath == "" {
+		return CommandResult{Message: "File path cannot be empty."}, nil
+	}
+
+	// Fetch all subscriptions
+	rows, err := a.db.QueryContext(ctx, "SELECT id, title, feed_url FROM podcasts ORDER BY LOWER(title)")
+	if err != nil {
+		return CommandResult{}, err
+	}
+	defer rows.Close()
+
+	var subs []opml.Subscription
+	for rows.Next() {
+		var id, title, feedURL string
+		if err := rows.Scan(&id, &title, &feedURL); err != nil {
+			return CommandResult{}, err
+		}
+		subs = append(subs, opml.Subscription{
+			Title:   title,
+			FeedURL: feedURL,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return CommandResult{}, err
+	}
+
+	if len(subs) == 0 {
+		return CommandResult{Message: "No subscriptions to export."}, nil
+	}
+
+	// Create file
+	file, err := os.Create(filePath)
+	if err != nil {
+		return CommandResult{}, fmt.Errorf("create file: %w", err)
+	}
+	defer file.Close()
+
+	if err := opml.Export(file, subs); err != nil {
+		return CommandResult{}, err
+	}
+
+	return CommandResult{Message: fmt.Sprintf("Exported %d subscriptions to %s.", len(subs), filePath)}, nil
+}
+
+func (a *App) importCommand(ctx context.Context, args []string) (CommandResult, error) {
+	if len(args) != 1 {
+		return CommandResult{Message: "Usage: import <file_path>"}, nil
+	}
+	filePath := strings.TrimSpace(args[0])
+	if filePath == "" {
+		return CommandResult{Message: "File path cannot be empty."}, nil
+	}
+
+	// Open file
+	file, err := os.Open(filePath)
+	if err != nil {
+		return CommandResult{}, fmt.Errorf("open file: %w", err)
+	}
+	defer file.Close()
+
+	subs, err := opml.Import(file)
+	if err != nil {
+		return CommandResult{}, err
+	}
+
+	if len(subs) == 0 {
+		return CommandResult{Message: "No subscriptions found in OPML file."}, nil
+	}
+
+	// Import each subscription
+	imported := 0
+	skipped := 0
+	var errors []string
+
+	for _, sub := range subs {
+		// Check if already subscribed
+		var count int
+		err := a.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM podcasts WHERE feed_url = ?", sub.FeedURL).Scan(&count)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", sub.Title, err))
+			continue
+		}
+		if count > 0 {
+			skipped++
+			continue
+		}
+
+		// Fetch feed to get podcast ID
+		feedInfo, episodes, err := feeds.Fetch(ctx, a.httpClient, sub.FeedURL)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", sub.Title, err))
+			continue
+		}
+
+		// Generate ID from feed URL hash
+		podcastID := fmt.Sprintf("opml-%x", sha256.Sum256([]byte(sub.FeedURL)))[:16]
+
+		title := feedInfo.Title
+		if title == "" {
+			title = sub.Title
+		}
+		if title == "" {
+			title = "Untitled Podcast"
+		}
+
+		// Store subscription
+		meta := itunes.Podcast{
+			ID:      podcastID,
+			Title:   title,
+			FeedURL: sub.FeedURL,
+		}
+		_, err = a.storeSubscription(ctx, meta, feedInfo, episodes)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", title, err))
+			continue
+		}
+
+		imported++
+	}
+
+	var msg strings.Builder
+	msg.WriteString(fmt.Sprintf("Imported %d subscriptions, skipped %d already subscribed.", imported, skipped))
+	if len(errors) > 0 {
+		msg.WriteString(fmt.Sprintf("\nErrors: %d failures", len(errors)))
+		for _, errMsg := range errors {
+			if msg.Len() > 500 {
+				msg.WriteString("\n  ... (more errors omitted)")
+				break
+			}
+			msg.WriteString("\n  " + errMsg)
+		}
+	}
+
+	return CommandResult{Message: msg.String()}, nil
 }
 
 func (a *App) subscriptionExists(ctx context.Context, podcastID string) (bool, string, error) {
@@ -745,10 +922,11 @@ func (a *App) fetchEpisodeInfo(ctx context.Context, episodeID string) (episodeIn
 	var info episodeInfo
 	var published sql.NullString
 	var filePath sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT e.id, e.title, COALESCE(e.description, ''), e.state, e.published_at, e.file_path, e.enclosure_url, p.id, p.title
+	var hash sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT e.id, e.title, COALESCE(e.description, ''), e.state, e.published_at, e.file_path, e.enclosure_url, e.hash, p.id, p.title
         FROM episodes e
         JOIN podcasts p ON p.id = e.podcast_id
-        WHERE e.id = ?`, episodeID).Scan(&info.ID, &info.Title, &info.Description, &info.State, &published, &filePath, &info.EnclosureURL, &info.PodcastID, &info.PodcastTitle)
+        WHERE e.id = ?`, episodeID).Scan(&info.ID, &info.Title, &info.Description, &info.State, &published, &filePath, &info.EnclosureURL, &hash, &info.PodcastID, &info.PodcastTitle)
 	if err != nil {
 		return episodeInfo{}, err
 	}
@@ -763,6 +941,9 @@ func (a *App) fetchEpisodeInfo(ctx context.Context, episodeID string) (episodeIn
 	}
 	if filePath.Valid {
 		info.FilePath = filePath.String
+	}
+	if hash.Valid {
+		info.Hash = hash.String
 	}
 	return info, nil
 }
@@ -879,7 +1060,7 @@ func (a *App) requeueEpisode(ctx context.Context, episodeID string) error {
 	return err
 }
 
-func (a *App) persistDownloadResult(ctx context.Context, episodeID, finalPath string) error {
+func (a *App) persistDownloadResult(ctx context.Context, episodeID, finalPath, hash string) error {
 	return withRetry(ctx, func() error {
 		tx, err := a.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -893,7 +1074,7 @@ func (a *App) persistDownloadResult(ctx context.Context, episodeID, finalPath st
 		}()
 
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, downloaded_at = ?, file_path = ?, retry_count = 0 WHERE id = ?", stateDownloaded, now, finalPath, episodeID); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, downloaded_at = ?, file_path = ?, hash = ?, retry_count = 0 WHERE id = ?", stateDownloaded, now, finalPath, hash, episodeID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID); err != nil {
@@ -939,6 +1120,15 @@ func (a *App) episodePartialPath(info episodeInfo) string {
 }
 
 func (a *App) downloadOnce(ctx context.Context, info episodeInfo, finalPath, partialPath string) (string, error) {
+	// Check if file already exists with same hash
+	if _, err := os.Stat(finalPath); err == nil {
+		existingHash, err := computeFileHash(finalPath)
+		if err == nil && existingHash == info.Hash && info.Hash != "" {
+			// File exists with same hash, no need to re-download
+			return finalPath, nil
+		}
+	}
+
 	file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return "", err
@@ -996,11 +1186,27 @@ func (a *App) downloadOnce(ctx context.Context, info episodeInfo, finalPath, par
 		return "", err
 	}
 
+	// Compute hash of downloaded file
+	hash, err := computeFileHash(partialPath)
+	if err != nil {
+		return "", fmt.Errorf("compute hash: %w", err)
+	}
+
+	// Check if final file exists and has same hash
+	if _, err := os.Stat(finalPath); err == nil {
+		existingHash, err := computeFileHash(finalPath)
+		if err == nil && existingHash == hash {
+			// File already exists with same content, just remove partial
+			os.Remove(partialPath)
+			return finalPath, nil
+		}
+	}
+
 	if err := moveFile(partialPath, finalPath); err != nil {
 		return "", err
 	}
 
-	if err := a.persistDownloadResult(ctx, info.ID, finalPath); err != nil {
+	if err := a.persistDownloadResult(ctx, info.ID, finalPath, hash); err != nil {
 		return "", err
 	}
 
@@ -1283,4 +1489,20 @@ func fileExtension(rawURL string) string {
 		}
 	}
 	return ".mp3"
+}
+
+// computeFileHash computes the SHA256 hash of a file.
+func computeFileHash(filePath string) (string, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }

@@ -12,12 +12,14 @@ import (
 )
 
 type model struct {
-	ctx      context.Context
-	app      *app.App
-	input    textinput.Model
-	history  []string
-	messages []string
-	quitting bool
+	ctx          context.Context
+	app          *app.App
+	input        textinput.Model
+	history      []string
+	messages     []string
+	quitting     bool
+	completions  []string
+	completionIdx int
 }
 
 func newModel(ctx context.Context, application *app.App) model {
@@ -51,7 +53,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case tea.KeyEnter:
+			m.completions = nil
+			m.completionIdx = 0
 			return m.handleSubmit()
+		case tea.KeyTab:
+			return m.handleTabComplete()
+		default:
+			// Reset completions on any other key
+			m.completions = nil
+			m.completionIdx = 0
 		}
 	}
 
@@ -98,6 +108,44 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	}
+
+	return m, nil
+}
+
+func (m model) handleTabComplete() (tea.Model, tea.Cmd) {
+	input := m.input.Value()
+	words := strings.Fields(input)
+	if len(words) == 0 {
+		return m, nil
+	}
+
+	// Only complete the first word (command name)
+	if len(words) > 1 {
+		return m, nil
+	}
+
+	prefix := words[0]
+
+	// Build or cycle through completions
+	if m.completions == nil {
+		commandNames := m.app.CommandNames()
+		for _, name := range commandNames {
+			if strings.HasPrefix(name, prefix) {
+				m.completions = append(m.completions, name)
+			}
+		}
+		if len(m.completions) == 0 {
+			return m, nil
+		}
+		m.completionIdx = 0
+	} else {
+		// Cycle to next completion
+		m.completionIdx = (m.completionIdx + 1) % len(m.completions)
+	}
+
+	// Apply completion
+	m.input.SetValue(m.completions[m.completionIdx])
+	m.input.SetCursor(len(m.completions[m.completionIdx]))
 
 	return m, nil
 }
