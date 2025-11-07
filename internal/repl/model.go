@@ -25,6 +25,7 @@ type model struct {
 	completions   []string
 	completionIdx int
 	theme         theme.Theme
+	width         int // Terminal width
 
 	// Interactive search list state
 	searchMode    bool
@@ -82,6 +83,14 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		// Re-format episode description if in episode details mode
+		if m.episodeDetailsMode {
+			m.episodeDetailLines = formatEpisodeDescription(m.episodeDetail.Description, msg.Width)
+			m.episodeDetailScroll = 0
+		}
+		return m, nil
 	case tea.KeyMsg:
 		// Handle search details mode navigation
 		if m.detailsMode {
@@ -755,9 +764,7 @@ func (m model) renderEpisodeDetails() string {
 	dateStyle := m.theme.Date
 
 	b.WriteString(headerStyle.Render(detail.Title))
-	b.WriteString("\n")
-	b.WriteString(dimStyle.Render(fmt.Sprintf("Episode ID: %s", detail.ID)))
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	if detail.PodcastTitle != "" {
 		b.WriteString(normalStyle.Render(fmt.Sprintf("Podcast: %s (%s)", detail.PodcastTitle, detail.PodcastID)))
@@ -833,7 +840,7 @@ func (m *model) enterEpisodeDetails(detail app.EpisodeDetail) {
 	m.episodeDetailsMode = true
 	m.episodeDetail = detail
 	m.episodeDetailScroll = 0
-	m.episodeDetailLines = formatEpisodeDescription(detail.Description)
+	m.episodeDetailLines = formatEpisodeDescription(detail.Description, m.width)
 }
 
 func (m model) maxEpisodeDescriptionLines() int {
@@ -871,7 +878,7 @@ func (m *model) adjustEpisodeDetailScroll(delta int) {
 	m.episodeDetailScroll = newScroll
 }
 
-func formatEpisodeDescription(desc string) []string {
+func formatEpisodeDescription(desc string, width int) []string {
 	cleaned := strings.TrimSpace(desc)
 	if cleaned == "" {
 		return nil
@@ -900,5 +907,75 @@ func formatEpisodeDescription(desc string) []string {
 		lines = lines[:len(lines)-1]
 	}
 
-	return lines
+	// Wrap lines at terminal width
+	if width <= 0 {
+		width = 80 // Default width
+	}
+	wrappedLines := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			wrappedLines = append(wrappedLines, line)
+			continue
+		}
+		wrapped := wrapLine(line, width)
+		wrappedLines = append(wrappedLines, wrapped...)
+	}
+
+	return wrappedLines
+}
+
+// wrapLine wraps a single line at the specified width
+func wrapLine(line string, width int) []string {
+	if len(line) <= width {
+		return []string{line}
+	}
+
+	var result []string
+	words := strings.Fields(line)
+	if len(words) == 0 {
+		return []string{line}
+	}
+
+	currentLine := ""
+	for _, word := range words {
+		// If word itself is longer than width, break it
+		if len(word) > width {
+			if currentLine != "" {
+				result = append(result, currentLine)
+				currentLine = ""
+			}
+			// Break long word across lines
+			for len(word) > width {
+				result = append(result, word[:width])
+				word = word[width:]
+			}
+			if word != "" {
+				currentLine = word
+			}
+			continue
+		}
+
+		// Try adding word to current line
+		testLine := currentLine
+		if testLine != "" {
+			testLine += " "
+		}
+		testLine += word
+
+		if len(testLine) <= width {
+			currentLine = testLine
+		} else {
+			// Word doesn't fit, start new line
+			if currentLine != "" {
+				result = append(result, currentLine)
+			}
+			currentLine = word
+		}
+	}
+
+	if currentLine != "" {
+		result = append(result, currentLine)
+	}
+
+	return result
 }
