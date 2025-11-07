@@ -36,6 +36,7 @@ func applyPragmas(db *sql.DB) error {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA foreign_keys=ON",
+		"PRAGMA busy_timeout=5000",
 	}
 
 	for _, pragma := range pragmas {
