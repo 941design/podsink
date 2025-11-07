@@ -404,8 +404,6 @@ func (a *App) registerCommands() {
 	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
 	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
 	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
-	a.registerCommand("export", "export <file_path>", "Export subscriptions to OPML file", a.exportCommand)
-	a.registerCommand("import", "import <file_path>", "Import subscriptions from OPML file", a.importCommand)
 }
 
 func (a *App) registerCommand(name, usage, summary string, handler commandHandler, aliases ...string) {
@@ -674,19 +672,33 @@ func (a *App) ignoreCommand(ctx context.Context, args []string) (CommandResult, 
 	}
 }
 
-func (a *App) exportCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) != 1 {
-		return CommandResult{Message: "Usage: export <file_path>"}, nil
-	}
-	filePath := strings.TrimSpace(args[0])
+// ErrNoSubscriptionsToExport indicates that the database contains no
+// subscriptions to export to OPML.
+var ErrNoSubscriptionsToExport = errors.New("no subscriptions to export")
+
+// ErrNoSubscriptionsInOPML indicates that an OPML file did not contain any
+// subscriptions to import.
+var ErrNoSubscriptionsInOPML = errors.New("no subscriptions found in OPML file")
+
+// OPMLImportResult captures the outcome of importing subscriptions from an
+// OPML file.
+type OPMLImportResult struct {
+	Imported int
+	Skipped  int
+	Errors   []string
+}
+
+// ExportOPML writes the current subscriptions to an OPML file at the provided
+// path.
+func (a *App) ExportOPML(ctx context.Context, filePath string) (int, error) {
+	filePath = strings.TrimSpace(filePath)
 	if filePath == "" {
-		return CommandResult{Message: "File path cannot be empty."}, nil
+		return 0, errors.New("file path cannot be empty")
 	}
 
-	// Fetch all subscriptions
 	rows, err := a.db.QueryContext(ctx, "SELECT id, title, feed_url FROM podcasts ORDER BY LOWER(title)")
 	if err != nil {
-		return CommandResult{}, err
+		return 0, err
 	}
 	defer rows.Close()
 
@@ -694,7 +706,7 @@ func (a *App) exportCommand(ctx context.Context, args []string) (CommandResult, 
 	for rows.Next() {
 		var id, title, feedURL string
 		if err := rows.Scan(&id, &title, &feedURL); err != nil {
-			return CommandResult{}, err
+			return 0, err
 		}
 		subs = append(subs, opml.Subscription{
 			Title:   title,
@@ -702,78 +714,66 @@ func (a *App) exportCommand(ctx context.Context, args []string) (CommandResult, 
 		})
 	}
 	if err := rows.Err(); err != nil {
-		return CommandResult{}, err
+		return 0, err
 	}
-
 	if len(subs) == 0 {
-		return CommandResult{Message: "No subscriptions to export."}, nil
+		return 0, ErrNoSubscriptionsToExport
 	}
 
-	// Create file
 	file, err := os.Create(filePath)
 	if err != nil {
-		return CommandResult{}, fmt.Errorf("create file: %w", err)
+		return 0, fmt.Errorf("create file: %w", err)
 	}
 	defer file.Close()
 
 	if err := opml.Export(file, subs); err != nil {
-		return CommandResult{}, err
+		return 0, err
 	}
 
-	return CommandResult{Message: fmt.Sprintf("Exported %d subscriptions to %s.", len(subs), filePath)}, nil
+	return len(subs), nil
 }
 
-func (a *App) importCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) != 1 {
-		return CommandResult{Message: "Usage: import <file_path>"}, nil
-	}
-	filePath := strings.TrimSpace(args[0])
+// ImportOPML loads subscriptions from an OPML file at the provided path.
+func (a *App) ImportOPML(ctx context.Context, filePath string) (OPMLImportResult, error) {
+	filePath = strings.TrimSpace(filePath)
 	if filePath == "" {
-		return CommandResult{Message: "File path cannot be empty."}, nil
+		return OPMLImportResult{}, errors.New("file path cannot be empty")
 	}
 
-	// Open file
 	file, err := os.Open(filePath)
 	if err != nil {
-		return CommandResult{}, fmt.Errorf("open file: %w", err)
+		return OPMLImportResult{}, fmt.Errorf("open file: %w", err)
 	}
 	defer file.Close()
 
 	subs, err := opml.Import(file)
 	if err != nil {
-		return CommandResult{}, err
+		return OPMLImportResult{}, err
 	}
-
 	if len(subs) == 0 {
-		return CommandResult{Message: "No subscriptions found in OPML file."}, nil
+		return OPMLImportResult{}, ErrNoSubscriptionsInOPML
 	}
 
-	// Import each subscription
-	imported := 0
-	skipped := 0
-	var errors []string
-
+	var result OPMLImportResult
 	for _, sub := range subs {
 		// Check if already subscribed
 		var count int
 		err := a.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM podcasts WHERE feed_url = ?", sub.FeedURL).Scan(&count)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", sub.Title, err))
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", sub.Title, err))
 			continue
 		}
 		if count > 0 {
-			skipped++
+			result.Skipped++
 			continue
 		}
 
-		// Fetch feed to get podcast ID
 		feedInfo, episodes, err := feeds.Fetch(ctx, a.httpClient, sub.FeedURL)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", sub.Title, err))
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", sub.Title, err))
 			continue
 		}
 
-		// Generate ID from feed URL hash
 		podcastID := fmt.Sprintf("opml-%x", sha256.Sum256([]byte(sub.FeedURL)))[:16]
 
 		title := feedInfo.Title
@@ -784,35 +784,20 @@ func (a *App) importCommand(ctx context.Context, args []string) (CommandResult, 
 			title = "Untitled Podcast"
 		}
 
-		// Store subscription
 		meta := itunes.Podcast{
 			ID:      podcastID,
 			Title:   title,
 			FeedURL: sub.FeedURL,
 		}
-		_, err = a.storeSubscription(ctx, meta, feedInfo, episodes)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %v", title, err))
+		if _, err = a.storeSubscription(ctx, meta, feedInfo, episodes); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", title, err))
 			continue
 		}
 
-		imported++
+		result.Imported++
 	}
 
-	var msg strings.Builder
-	msg.WriteString(fmt.Sprintf("Imported %d subscriptions, skipped %d already subscribed.", imported, skipped))
-	if len(errors) > 0 {
-		msg.WriteString(fmt.Sprintf("\nErrors: %d failures", len(errors)))
-		for _, errMsg := range errors {
-			if msg.Len() > 500 {
-				msg.WriteString("\n  ... (more errors omitted)")
-				break
-			}
-			msg.WriteString("\n  " + errMsg)
-		}
-	}
-
-	return CommandResult{Message: msg.String()}, nil
+	return result, nil
 }
 
 func (a *App) subscriptionExists(ctx context.Context, podcastID string) (bool, string, error) {
