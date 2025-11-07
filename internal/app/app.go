@@ -105,15 +105,21 @@ type Dependencies struct {
 type CommandResult struct {
 	Message        string
 	Quit           bool
-	SearchResults  []SearchResult  // For interactive search display
+	SearchResults  []SearchResult // For interactive search display
+	SearchTitle    string
+	SearchHint     string
+	SearchContext  string
 	EpisodeResults []EpisodeResult // For interactive episode list display
 }
 
 // SearchResult represents a scored podcast search result
 type SearchResult struct {
-	Podcast      itunes.Podcast
-	Score        float64
-	IsSubscribed bool
+	Podcast       itunes.Podcast
+	Score         float64
+	IsSubscribed  bool
+	NewCount      int
+	UnplayedCount int
+	TotalCount    int
 }
 
 // EpisodeResult represents an episode for interactive display
@@ -310,14 +316,16 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 		}
 	}
 
-	return CommandResult{SearchResults: searchResults}, nil
+	return CommandResult{
+		SearchResults: searchResults,
+		SearchTitle:   "Search Results",
+		SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, Esc to exit",
+		SearchContext: "search",
+	}, nil
 }
 
-func (a *App) subscribeCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) != 1 {
-		return CommandResult{Message: "Usage: subscribe <podcast_id>"}, nil
-	}
-	podcastID := strings.TrimSpace(args[0])
+func (a *App) SubscribePodcast(ctx context.Context, podcast itunes.Podcast) (CommandResult, error) {
+	podcastID := strings.TrimSpace(podcast.ID)
 	if podcastID == "" {
 		return CommandResult{Message: "Podcast ID cannot be empty."}, nil
 	}
@@ -326,14 +334,21 @@ func (a *App) subscribeCommand(ctx context.Context, args []string) (CommandResul
 		return CommandResult{}, err
 	} else if exists {
 		if title == "" {
+			title = podcast.Title
+		}
+		if title == "" {
 			title = podcastID
 		}
 		return CommandResult{Message: fmt.Sprintf("Already subscribed to %s.", title)}, nil
 	}
 
-	meta, err := a.itunes.LookupPodcast(ctx, podcastID)
-	if err != nil {
-		return CommandResult{}, err
+	meta := podcast
+	if strings.TrimSpace(meta.FeedURL) == "" {
+		var err error
+		meta, err = a.itunes.LookupPodcast(ctx, podcastID)
+		if err != nil {
+			return CommandResult{}, err
+		}
 	}
 	if strings.TrimSpace(meta.FeedURL) == "" {
 		return CommandResult{}, fmt.Errorf("podcast feed URL missing")
@@ -343,9 +358,12 @@ func (a *App) subscribeCommand(ctx context.Context, args []string) (CommandResul
 	if err != nil {
 		return CommandResult{}, err
 	}
-	title := feedInfo.Title
-	if strings.TrimSpace(title) == "" {
-		title = meta.Title
+	title := strings.TrimSpace(feedInfo.Title)
+	if title == "" {
+		title = strings.TrimSpace(meta.Title)
+	}
+	if title == "" {
+		title = podcastID
 	}
 
 	added, err := a.storeSubscription(ctx, meta, feedInfo, episodes)
@@ -356,11 +374,8 @@ func (a *App) subscribeCommand(ctx context.Context, args []string) (CommandResul
 	return CommandResult{Message: fmt.Sprintf("Subscribed to %s (%d new episodes).", title, added)}, nil
 }
 
-func (a *App) unsubscribeCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) != 1 {
-		return CommandResult{Message: "Usage: unsubscribe <podcast_id>"}, nil
-	}
-	podcastID := strings.TrimSpace(args[0])
+func (a *App) UnsubscribePodcast(ctx context.Context, podcastID string) (CommandResult, error) {
+	podcastID = strings.TrimSpace(podcastID)
 	if podcastID == "" {
 		return CommandResult{Message: "Podcast ID cannot be empty."}, nil
 	}
@@ -384,8 +399,6 @@ func (a *App) registerCommands() {
 	a.registerCommand("config", "config [show]", "View or edit application configuration", a.configCommand)
 	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
 	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
-	a.registerCommand("subscribe", "subscribe <podcast_id>", "Subscribe to a podcast (use search for interactive mode)", a.subscribeCommand)
-	a.registerCommand("unsubscribe", "unsubscribe <podcast_id>", "Unsubscribe from a podcast", a.unsubscribeCommand)
 	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
 	a.registerCommand("episodes", "episodes <podcast_id>", "View episodes for a podcast", a.episodesCommand, "e")
 	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
@@ -491,26 +504,26 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 			}
 		}
 
-		maxID := len("ID")
-		maxTitle := len("Title")
+		results := make([]SearchResult, 0, len(summaries))
 		for _, s := range summaries {
-			if len(s.ID) > maxID {
-				maxID = len(s.ID)
-			}
-			if len(s.Title) > maxTitle {
-				maxTitle = len(s.Title)
-			}
+			results = append(results, SearchResult{
+				Podcast: itunes.Podcast{
+					ID:    s.ID,
+					Title: s.Title,
+				},
+				IsSubscribed:  true,
+				NewCount:      s.NewCount,
+				UnplayedCount: s.UnplayedCount,
+				TotalCount:    s.TotalCount,
+			})
 		}
 
-		var builder strings.Builder
-		builder.WriteString("Subscriptions:\n")
-		builder.WriteString(fmt.Sprintf("  %-*s  %-*s  %5s  %8s  %5s\n", maxID, "ID", maxTitle, "Title", "New", "Unplayed", "Total"))
-		builder.WriteString("  " + strings.Repeat("-", maxID) + "  " + strings.Repeat("-", maxTitle) + "  -----  --------  -----\n")
-		for _, s := range summaries {
-			builder.WriteString(fmt.Sprintf("  %-*s  %-*s  %5d  %8d  %5d\n", maxID, s.ID, maxTitle, s.Title, s.NewCount, s.UnplayedCount, s.TotalCount))
-		}
-
-		return CommandResult{Message: strings.TrimRight(builder.String(), "\n")}, nil
+		return CommandResult{
+			SearchResults: results,
+			SearchTitle:   "Subscriptions",
+			SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [u] unsubscribe, Esc to exit",
+			SearchContext: "subscriptions",
+		}, nil
 	default:
 		return CommandResult{Message: fmt.Sprintf("unknown list target: %s", args[0])}, nil
 	}

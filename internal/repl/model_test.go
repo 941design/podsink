@@ -2,8 +2,11 @@ package repl
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -23,6 +26,8 @@ func newTestApp(t *testing.T) *app.App {
 	cfg.DownloadRoot = filepath.Join(dir, "downloads")
 	cfg.TmpDir = filepath.Join(dir, "tmp")
 
+	httpClient := &http.Client{Transport: stubTransport{}}
+
 	db, err := storage.Open(filepath.Join(dir, "app.db"))
 	if err != nil {
 		t.Fatalf("storage.Open() error = %v", err)
@@ -38,11 +43,40 @@ func newTestApp(t *testing.T) *app.App {
 		t.Fatalf("mkdir tmp: %v", err)
 	}
 
-	application := app.New(cfg, filepath.Join(dir, "config.yaml"), db)
+	deps := app.Dependencies{
+		HTTPClient: httpClient,
+	}
+	application := app.NewWithDependencies(cfg, filepath.Join(dir, "config.yaml"), db, deps)
 	t.Cleanup(func() {
 		application.Close()
 	})
 	return application
+}
+
+type stubTransport struct{}
+
+func (stubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	rss := `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Stub Podcast</title>
+    <description>Example description</description>
+    <item>
+      <guid>stub-episode</guid>
+      <title>Stub Episode</title>
+      <description>Example episode</description>
+      <enclosure url="http://example.com/audio.mp3" type="audio/mpeg" />
+    </item>
+  </channel>
+</rss>`
+
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        http.Header{"Content-Type": []string{"application/rss+xml"}},
+		Body:          io.NopCloser(strings.NewReader(rss)),
+		ContentLength: int64(len(rss)),
+		Request:       req,
+	}, nil
 }
 
 // TestSubscribeNavigationFromListView verifies that subscribing from list view keeps the user in list view
@@ -90,7 +124,9 @@ func TestUnsubscribeNavigationFromListView(t *testing.T) {
 	a := newTestApp(t)
 
 	// Subscribe first
-	_, _ = a.Execute(context.Background(), "subscribe 12345")
+	if _, err := a.SubscribePodcast(context.Background(), itunes.Podcast{ID: "12345", Title: "Test Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
 
 	m := model{
 		ctx:         context.Background(),
@@ -140,7 +176,9 @@ func TestUnsubscribeUpdatesStatusInListView(t *testing.T) {
 	a := newTestApp(t)
 
 	// Subscribe first
-	_, _ = a.Execute(context.Background(), "subscribe 12345")
+	if _, err := a.SubscribePodcast(context.Background(), itunes.Podcast{ID: "12345", Title: "Test Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
 
 	m := model{
 		ctx:         context.Background(),

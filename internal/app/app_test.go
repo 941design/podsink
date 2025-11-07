@@ -122,11 +122,21 @@ func TestPodcastLifecycle(t *testing.T) {
 		return result
 	}
 
+	subscribe := func(podcast itunes.Podcast) CommandResult {
+		result, err := application.SubscribePodcast(ctx, podcast)
+		if err != nil {
+			t.Fatalf("SubscribePodcast(%s) error = %v", podcast.ID, err)
+		}
+		return result
+	}
+
 	searchResult := exec("search Example")
 	found := false
+	var targetPodcast itunes.Podcast
 	for _, sr := range searchResult.SearchResults {
 		if sr.Podcast.ID == "12345" {
 			found = true
+			targetPodcast = sr.Podcast
 			break
 		}
 	}
@@ -134,7 +144,7 @@ func TestPodcastLifecycle(t *testing.T) {
 		t.Fatalf("search results missing podcast id 12345")
 	}
 
-	if msg := exec("subscribe 12345").Message; !strings.Contains(msg, "Subscribed to Example Podcast") {
+	if msg := subscribe(targetPodcast).Message; !strings.Contains(msg, "Subscribed to Example Podcast") {
 		t.Fatalf("subscribe output unexpected: %s", msg)
 	}
 
@@ -146,8 +156,19 @@ func TestPodcastLifecycle(t *testing.T) {
 		t.Fatalf("expected 2 episodes, got %d", count)
 	}
 
-	if msg := exec("list subscriptions").Message; !strings.Contains(msg, "Example Podcast") {
-		t.Fatalf("list output missing subscription: %s", msg)
+	listResult := exec("list subscriptions")
+	if len(listResult.SearchResults) == 0 {
+		t.Fatal("list subscriptions should return search results")
+	}
+	listFound := false
+	for _, sr := range listResult.SearchResults {
+		if sr.Podcast.Title == "Example Podcast" {
+			listFound = true
+			break
+		}
+	}
+	if !listFound {
+		t.Fatalf("list output missing subscription: %+v", listResult.SearchResults)
 	}
 
 	episodesResult := exec("episodes 12345")
@@ -308,18 +329,28 @@ func TestDownloadRetriesAndResume(t *testing.T) {
 		return result
 	}
 
+	subscribe := func(podcast itunes.Podcast) CommandResult {
+		result, err := app.SubscribePodcast(ctx, podcast)
+		if err != nil {
+			t.Fatalf("SubscribePodcast(%s) error = %v", podcast.ID, err)
+		}
+		return result
+	}
+
 	searchResult := exec("search Retry")
 	found := false
+	var targetPodcast itunes.Podcast
 	for _, sr := range searchResult.SearchResults {
 		if sr.Podcast.ID == podcastID {
 			found = true
+			targetPodcast = sr.Podcast
 			break
 		}
 	}
 	if !found {
 		t.Fatalf("search results missing podcast id %s", podcastID)
 	}
-	if msg := exec("subscribe " + podcastID).Message; !strings.Contains(msg, "Subscribed") {
+	if msg := subscribe(targetPodcast).Message; !strings.Contains(msg, "Subscribed") {
 		t.Fatalf("subscribe output unexpected: %s", msg)
 	}
 
@@ -473,18 +504,28 @@ func TestDownloadQueueProcessesInParallel(t *testing.T) {
 		return result
 	}
 
+	subscribe := func(podcast itunes.Podcast) CommandResult {
+		result, err := app.SubscribePodcast(ctx, podcast)
+		if err != nil {
+			t.Fatalf("SubscribePodcast(%s) error = %v", podcast.ID, err)
+		}
+		return result
+	}
+
 	searchResult := exec("search Parallel")
 	found := false
+	var targetPodcast itunes.Podcast
 	for _, sr := range searchResult.SearchResults {
 		if sr.Podcast.ID == podcastID {
 			found = true
+			targetPodcast = sr.Podcast
 			break
 		}
 	}
 	if !found {
 		t.Fatalf("search results missing podcast id %s", podcastID)
 	}
-	if msg := exec("subscribe " + podcastID).Message; !strings.Contains(msg, "Subscribed") {
+	if msg := subscribe(targetPodcast).Message; !strings.Contains(msg, "Subscribed") {
 		t.Fatalf("subscribe output unexpected: %s", msg)
 	}
 

@@ -42,8 +42,6 @@ Production-ready v1.0.
 - Autocomplete and inline help.
 - Commands:
   - `search [query]`
-  - `subscribe [podcast_id]`
-  - `unsubscribe [podcast_id]`
   - `list subscriptions`
   - `episodes [podcast]`
   - `queue [episode_id]`
@@ -133,7 +131,7 @@ Failures are logged but do not alter persistent state.
 - Keyboard shortcuts: ↑↓ navigation, space toggle, Enter select, `d` download, `i` ignore.
 
 ### Search & Subscribe Flow
-After running `search <query>`, an interactive list of podcasts is displayed:
+After running `search <query>` or `list subscriptions`, an interactive list of podcasts is displayed:
 
 **List View:**
 - Navigate with ↑↓ or j/k keys
@@ -142,6 +140,7 @@ After running `search <query>`, an interactive list of podcasts is displayed:
 - Press `u` to unsubscribe directly (stays in list view)
 - Press `Esc` or `q` to exit search mode
 - Subscribed podcasts are shown in green with a `[subscribed]` suffix
+- The `list subscriptions` view shares the same layout, showing only subscribed podcasts with episode counts in the subtitle
 
 **Details View:**
 - Displays full podcast information including description
@@ -149,6 +148,7 @@ After running `search <query>`, an interactive list of podcasts is displayed:
 - Press `u` to unsubscribe from the podcast (returns to list view)
 - Press `x` or `Esc` to return to the list view
 - Subscription status is indicated by color (green for subscribed) and `[subscribed]` suffix
+- When invoked from `list subscriptions`, unsubscribing returns to the list with the podcast removed
 
 ### Config Management
 - `config` command shows editable key-value list.
@@ -194,8 +194,8 @@ After running `search <query>`, an interactive list of podcasts is displayed:
 - Details view shows full podcast information including description.
 
 ### Subscriptions
-- `list subscriptions` shows correct list.
-- Subscribe/unsubscribe updates DB immediately.
+- `list subscriptions` opens the interactive list view with all subscribed podcasts.
+- Subscribing/unsubscribing from either the search results or subscriptions list updates the database immediately and reflects in the UI without requiring podcast IDs.
 
 ### Episodes
 - `episodes [podcast]` lists correct items with states.
@@ -222,7 +222,7 @@ After running `search <query>`, an interactive list of podcasts is displayed:
 | Milestone | Focus | Deliverables |
 |------------|--------|--------------|
 | **M1 – Core CLI & Config** | Implement REPL shell, YAML config bootstrap/edit, SQLite setup. | `config`, `init`, `exit` commands functional. |
-| **M2 – Discovery & Subscriptions** | Integrate iTunes search API, parse RSS feeds, subscribe/unsubscribe. | `search`, `subscribe`, `unsubscribe`, `list subscriptions`. |
+| **M2 – Discovery & Subscriptions** | Integrate iTunes search API, parse RSS feeds, interactive subscribe/unsubscribe flows. | `search`, `list subscriptions`. |
 | **M3 – Episode Management** | Implement episode listing, state transitions, ignore logic. | `episodes`, `ignore`, state persistence. |
 | **M4 – Downloader** | Add concurrent resumable downloads, retry/backoff, overwrite logic. | `queue`, `download`, logging. |
 | **M5 – Polish & Production** | Autocomplete, help, packaging, release pipeline. | GitHub releases, docs, final binaries. |

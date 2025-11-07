@@ -56,17 +56,13 @@ Once in the REPL, you can use the following commands:
 
 ```
 podsink> search golang
-Search results:
-  12345  Go Time: Golang, Software Engineering, and More
-  67890  Cup o' Go - A podcast for Go developers
-
-podsink> subscribe 12345
-Subscribed to Go Time (15 new episodes).
+# An interactive list appears. Use ↑↓/jk to navigate results, Enter for details,
+# press "s" to subscribe, or "u" to unsubscribe. The same view is used when
+# browsing your subscriptions.
 
 podsink> list subscriptions
-Subscriptions:
-  ID     Title                  New  Unplayed  Total
-  12345  Go Time                15   15        150
+# Shows all subscribed podcasts in the interactive list. Use "u" to unsubscribe
+# from the highlighted podcast or Enter to view details.
 
 podsink> episodes 12345
 Episodes for Go Time (12345):
@@ -82,8 +78,6 @@ Available commands:
   help [command]              Show information about available commands
   config [show]               View or edit application configuration
   search <query>              Search for podcasts via the iTunes API
-  subscribe <podcast_id>      Subscribe to a podcast
-  unsubscribe <podcast_id>    Unsubscribe from a podcast
   list subscriptions          List all podcast subscriptions
   episodes <podcast_id>       View episodes for a podcast
   queue <episode_id>          Queue an episode for download
@@ -98,10 +92,8 @@ Available commands:
 
 ### Discovery & Subscription Management
 
-- `search <query>` - Search for podcasts using iTunes API
-- `subscribe <podcast_id>` - Subscribe to a podcast
-- `unsubscribe <podcast_id>` - Remove a subscription
-- `list subscriptions` - Show all subscriptions with episode counts
+- `search <query>` - Search for podcasts using iTunes API (interactive results support subscribing/unsubscribing)
+- `list subscriptions` - Browse all subscriptions in the interactive list (unsubscribe directly or open details)
 
 ### Episode Management
 

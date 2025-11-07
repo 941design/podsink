@@ -28,6 +28,9 @@ type model struct {
 	searchResults []app.SearchResult
 	searchCursor  int
 	expandedIndex int // -1 means nothing expanded
+	searchTitle   string
+	searchHint    string
+	searchContext string
 
 	// Interactive search details state
 	detailsMode    bool // When true, show single podcast details
@@ -100,6 +103,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchMode = false
 				m.searchResults = nil
 				m.expandedIndex = -1
+				m.searchTitle = ""
+				m.searchHint = ""
+				m.searchContext = ""
 				m.input.Focus()
 				return m, nil
 			case "up", "k":
@@ -244,6 +250,9 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.searchResults = result.SearchResults
 		m.searchCursor = 0
 		m.expandedIndex = -1
+		m.searchTitle = result.SearchTitle
+		m.searchHint = result.SearchHint
+		m.searchContext = result.SearchContext
 		m.input.Blur()
 		return m, nil
 	}
@@ -322,8 +331,8 @@ func (m model) handleSearchSubscribe() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Execute subscribe command
-	result, err := m.app.Execute(m.ctx, "subscribe "+podcast.ID)
+	// Execute subscribe action
+	result, err := m.app.SubscribePodcast(m.ctx, podcast)
 
 	if err != nil {
 		m.messages = append(m.messages, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(err.Error()))
@@ -375,8 +384,8 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Execute unsubscribe command
-	result, err := m.app.Execute(m.ctx, "unsubscribe "+podcast.ID)
+	// Execute unsubscribe action
+	result, err := m.app.UnsubscribePodcast(m.ctx, podcast.ID)
 
 	if err != nil {
 		m.messages = append(m.messages, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(err.Error()))
@@ -403,12 +412,27 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 
 	// Navigation logic after unsubscribe:
 	// - If in details view, return to list view
-	// - If in list view, stay in list view
+	// - If listing subscriptions, remove from the list
+	// - Otherwise stay in list view
 	if m.detailsMode {
 		m.detailsMode = false
-		// Stay in search mode (list view)
 	}
-	// If in list view (not details mode), we do nothing - stay in list view
+
+	if m.searchContext == "subscriptions" {
+		if m.searchCursor < len(m.searchResults) {
+			m.searchResults = append(m.searchResults[:m.searchCursor], m.searchResults[m.searchCursor+1:]...)
+			if m.searchCursor >= len(m.searchResults) && m.searchCursor > 0 {
+				m.searchCursor--
+			}
+		}
+		if len(m.searchResults) == 0 {
+			m.searchMode = false
+			m.searchTitle = ""
+			m.searchHint = ""
+			m.searchContext = ""
+			m.input.Focus()
+		}
+	}
 
 	return m, nil
 }
@@ -423,10 +447,22 @@ func (m model) renderSearchList() string {
 	subscribedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46"))    // Green for subscribed
 	unsubscribedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")) // Normal for unsubscribed
 
-	b.WriteString(headerStyle.Render("Search Results"))
+	title := m.searchTitle
+	if title == "" {
+		title = "Search Results"
+	}
+	hint := m.searchHint
+	if hint == "" {
+		hint = "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, Esc to exit"
+	}
+
+	b.WriteString(headerStyle.Render(title))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, Esc to exit"))
-	b.WriteString("\n\n")
+	if hint != "" {
+		b.WriteString(dimStyle.Render(hint))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	for i, result := range m.searchResults {
 		podcast := result.Podcast
@@ -445,6 +481,9 @@ func (m model) renderSearchList() string {
 
 		// Truncate author if too long
 		author := podcast.Author
+		if m.searchContext == "subscriptions" {
+			author = fmt.Sprintf("new: %d | unplayed: %d | total: %d", result.NewCount, result.UnplayedCount, result.TotalCount)
+		}
 		if author == "" {
 			author = "Unknown"
 		}
@@ -508,6 +547,11 @@ func (m model) renderSearchDetails() string {
 	// Genre
 	if podcast.Genre != "" {
 		b.WriteString(normalStyle.Render("Genre: " + podcast.Genre))
+		b.WriteString("\n")
+	}
+
+	if m.searchContext == "subscriptions" {
+		b.WriteString(normalStyle.Render(fmt.Sprintf("New: %d | Unplayed: %d | Total: %d", m.detailsPodcast.NewCount, m.detailsPodcast.UnplayedCount, m.detailsPodcast.TotalCount)))
 		b.WriteString("\n")
 	}
 
