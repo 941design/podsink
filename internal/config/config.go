@@ -12,6 +12,8 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/AlecAivazis/survey/v2/terminal"
 	"gopkg.in/yaml.v3"
+
+	"podsink/internal/theme"
 )
 
 // Config represents the persisted application configuration.
@@ -24,6 +26,7 @@ type Config struct {
 	UserAgent          string `yaml:"user_agent"`
 	Proxy              string `yaml:"proxy,omitempty"`
 	TLSVerify          bool   `yaml:"tls_verify"`
+	ColorTheme         string `yaml:"color_theme"`
 }
 
 // Defaults returns the baseline configuration used on first run.
@@ -38,6 +41,7 @@ func Defaults() Config {
 		RetryBackoffMaxSec: 60,
 		UserAgent:          "podsink/dev",
 		TLSVerify:          true,
+		ColorTheme:         theme.Default,
 	}
 }
 
@@ -74,6 +78,9 @@ func Load(path string) (Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if strings.TrimSpace(cfg.ColorTheme) == "" {
+		cfg.ColorTheme = theme.Default
 	}
 	return cfg, nil
 }
@@ -152,6 +159,7 @@ func EditableKeys() []string {
 		"user_agent",
 		"proxy",
 		"tls_verify",
+		"color_theme",
 	}
 }
 
@@ -220,6 +228,14 @@ func EditInteractive(ctx context.Context, cfg Config) (Config, error) {
 				Default: cfg.TLSVerify,
 			},
 		},
+		{
+			Name: "color_theme",
+			Prompt: &survey.Select{
+				Message: "Color theme",
+				Options: theme.Names(),
+				Default: cfg.ColorTheme,
+			},
+		},
 	}
 
 	answers := map[string]interface{}{}
@@ -241,6 +257,9 @@ func EditInteractive(ctx context.Context, cfg Config) (Config, error) {
 	cfg.UserAgent = strings.TrimSpace(answers["user_agent"].(string))
 	cfg.Proxy = strings.TrimSpace(answers["proxy"].(string))
 	cfg.TLSVerify = answers["tls_verify"].(bool)
+	if themeName, ok := answers["color_theme"].(string); ok {
+		cfg.ColorTheme = themeName
+	}
 
 	return cfg, nil
 }

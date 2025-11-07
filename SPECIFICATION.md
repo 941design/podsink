@@ -111,6 +111,7 @@ Failures are logged but do not alter persistent state.
 | `user_agent` | `podsink/<version>` | Custom user agent |
 | `proxy` | optional | HTTP proxy URL |
 | `tls_verify` | true | TLS strictness |
+| `color_theme` | `default` | UI color palette (`default`, `high_contrast`) |
 
 ### Data Model Highlights
 **Podcast:** `id`, `title`, `feed_url`, `subscribed_at`  

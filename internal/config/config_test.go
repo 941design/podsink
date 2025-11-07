@@ -26,6 +26,10 @@ func TestSaveAndLoad(t *testing.T) {
 	if loaded.DownloadRoot != original.DownloadRoot {
 		t.Fatalf("DownloadRoot mismatch: got %q want %q", loaded.DownloadRoot, original.DownloadRoot)
 	}
+
+	if loaded.ColorTheme != original.ColorTheme {
+		t.Fatalf("ColorTheme mismatch: got %q want %q", loaded.ColorTheme, original.ColorTheme)
+	}
 }
 
 func TestEnsureCreatesConfig(t *testing.T) {

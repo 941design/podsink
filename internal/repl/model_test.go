@@ -14,6 +14,7 @@ import (
 	"podsink/internal/config"
 	"podsink/internal/itunes"
 	"podsink/internal/storage"
+	"podsink/internal/theme"
 )
 
 // Helper to create a test app
@@ -101,6 +102,7 @@ func TestSubscribeNavigationFromListView(t *testing.T) {
 			},
 		},
 		searchCursor: 0,
+		theme:        theme.ForName(a.Config().ColorTheme),
 	}
 
 	// Execute
@@ -146,6 +148,7 @@ func TestUnsubscribeNavigationFromListView(t *testing.T) {
 			},
 		},
 		searchCursor: 0,
+		theme:        theme.ForName(a.Config().ColorTheme),
 	}
 
 	// Execute
@@ -198,6 +201,7 @@ func TestUnsubscribeUpdatesStatusInListView(t *testing.T) {
 			},
 		},
 		searchCursor: 0,
+		theme:        theme.ForName(a.Config().ColorTheme),
 	}
 
 	// Execute

@@ -11,6 +11,7 @@ import (
 
 	"podsink/internal/app"
 	"podsink/internal/itunes"
+	"podsink/internal/theme"
 )
 
 type model struct {
@@ -22,6 +23,7 @@ type model struct {
 	quitting      bool
 	completions   []string
 	completionIdx int
+	theme         theme.Theme
 
 	// Interactive search list state
 	searchMode    bool
@@ -46,6 +48,8 @@ type model struct {
 }
 
 func newModel(ctx context.Context, application *app.App) model {
+	cfg := application.Config()
+	th := theme.ForName(cfg.ColorTheme)
 	ti := textinput.New()
 	ti.Placeholder = "help"
 	ti.Focus()
@@ -58,8 +62,9 @@ func newModel(ctx context.Context, application *app.App) model {
 		app:     application,
 		input:   ti,
 		history: make([]string, 0, 32),
+		theme:   th,
 		messages: []string{
-			lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Render("Podsink CLI ready. Type 'help' for assistance."),
+			th.Message.Render("Podsink CLI ready. Type 'help' for assistance."),
 		},
 		longDescCache: make(map[string]string),
 	}
@@ -240,7 +245,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 
 	result, err := m.app.Execute(m.ctx, command)
 	if err != nil {
-		m.messages = append(m.messages, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(err.Error()))
+		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 		return m, nil
 	}
 
@@ -335,7 +340,7 @@ func (m model) handleSearchSubscribe() (tea.Model, tea.Cmd) {
 	result, err := m.app.SubscribePodcast(m.ctx, podcast)
 
 	if err != nil {
-		m.messages = append(m.messages, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(err.Error()))
+		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 		// Stay in current mode on error
 		return m, nil
 	}
@@ -388,7 +393,7 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 	result, err := m.app.UnsubscribePodcast(m.ctx, podcast.ID)
 
 	if err != nil {
-		m.messages = append(m.messages, lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(err.Error()))
+		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 		// Stay in current mode on error
 		return m, nil
 	}
@@ -440,12 +445,12 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 func (m model) renderSearchList() string {
 	var b strings.Builder
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	subscribedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46"))    // Green for subscribed
-	unsubscribedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")) // Normal for unsubscribed
+	headerStyle := m.theme.Header
+	cursorStyle := m.theme.Cursor
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+	subscribedStyle := m.theme.Subscribed
+	unsubscribedStyle := m.theme.Unsubscribed
 
 	title := m.searchTitle
 	if title == "" {
@@ -509,11 +514,11 @@ func (m model) renderSearchList() string {
 func (m model) renderSearchDetails() string {
 	var b strings.Builder
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	subscribedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("46")).Bold(true) // Green for subscribed
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Italic(true)
+	headerStyle := m.theme.Header
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+	subscribedStyle := m.theme.Subscribed
+	descStyle := m.theme.Description
 
 	podcast := m.detailsPodcast.Podcast
 
@@ -591,12 +596,12 @@ func (m model) renderSearchDetails() string {
 func (m model) renderEpisodeList() string {
 	var b strings.Builder
 
-	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	stateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	dateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
+	headerStyle := m.theme.Header
+	cursorStyle := m.theme.Cursor
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+	stateStyle := m.theme.State
+	dateStyle := m.theme.Date
 
 	if len(m.episodeResults) > 0 {
 		title := m.episodeResults[0].PodcastTitle
