@@ -2,34 +2,28 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path"
-	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/kballard/go-shellquote"
 	"gopkg.in/yaml.v3"
 
 	"podsink/internal/config"
-	"podsink/internal/feeds"
+	"podsink/internal/domain"
+	"podsink/internal/downloads"
+	"podsink/internal/episodes"
 	"podsink/internal/fuzzy"
 	"podsink/internal/itunes"
-	"podsink/internal/opml"
+	"podsink/internal/repository"
+	"podsink/internal/subscriptions"
 )
 
 type commandHandler func(context.Context, []string) (CommandResult, error)
@@ -41,78 +35,23 @@ type command struct {
 }
 
 const (
-	stateNew        = "NEW"
-	stateSeen       = "SEEN"
-	stateIgnored    = "IGNORED"
-	stateQueued     = "QUEUED"
-	stateDownloaded = "DOWNLOADED"
+	stateNew        = domain.EpisodeStateNew
+	stateSeen       = domain.EpisodeStateSeen
+	stateIgnored    = domain.EpisodeStateIgnored
+	stateQueued     = domain.EpisodeStateQueued
+	stateDownloaded = domain.EpisodeStateDownloaded
 )
 
-var invalidPathChars = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
-
-type subscriptionSummary struct {
-	ID            string
-	Title         string
-	NewCount      int
-	UnplayedCount int
-	TotalCount    int
-}
-
-type episodeRow struct {
-	ID          string
-	Title       string
-	State       string
-	PublishedAt time.Time
-	HasPublish  bool
-}
-
-type episodeInfo struct {
-	ID           string
-	Title        string
-	Description  string
-	State        string
-	PublishedAt  time.Time
-	HasPublish   bool
-	FilePath     string
-	EnclosureURL string
-	Hash         string
-	PodcastID    string
-	PodcastTitle string
-}
-
-// App encapsulates the long-lived dependencies shared across the REPL.
-type App struct {
-	config     config.Config
-	configPath string
-	db         *sql.DB
-	httpClient *http.Client
-	itunes     *itunes.Client
-
-	commands    map[string]*command
-	helpList    []*command
-	sleep       sleepFunc
-	downloadMgr *downloadManager
-}
-
-// Dependencies captures optional external dependencies for App construction.
-type Dependencies struct {
-	HTTPClient *http.Client
-	ITunes     *itunes.Client
-	Sleep      sleepFunc
-}
-
-// CommandResult captures the outcome of executing a command.
 type CommandResult struct {
 	Message        string
 	Quit           bool
-	SearchResults  []SearchResult // For interactive search display
+	SearchResults  []SearchResult
 	SearchTitle    string
 	SearchHint     string
 	SearchContext  string
-	EpisodeResults []EpisodeResult // For interactive episode list display
+	EpisodeResults []domain.EpisodeResult
 }
 
-// SearchResult represents a scored podcast search result
 type SearchResult struct {
 	Podcast       itunes.Podcast
 	Score         float64
@@ -122,131 +61,197 @@ type SearchResult struct {
 	TotalCount    int
 }
 
-// EpisodeResult represents an episode for interactive display
-type EpisodeResult struct {
-	Episode      episodeRow
-	PodcastTitle string
-	PodcastID    string
+type EpisodeResult = domain.EpisodeResult
+
+type EpisodeDetail = domain.EpisodeDetail
+
+var (
+	ErrNoSubscriptionsToExport = subscriptions.ErrNoSubscriptionsToExport
+	ErrNoSubscriptionsInOPML   = subscriptions.ErrNoSubscriptionsInOPML
+)
+
+type App struct {
+	config        config.Config
+	configPath    string
+	db            *sql.DB
+	httpClient    *http.Client
+	itunes        *itunes.Client
+	commands      map[string]*command
+	helpList      []*command
+	subscriptions *subscriptions.Service
+	episodes      *episodes.Service
+	downloads     *downloads.Service
+	downloadMgr   *downloads.Manager
 }
 
-// EpisodeDetail represents expanded episode metadata for detail views.
-type EpisodeDetail struct {
-	ID           string
-	Title        string
-	Description  string
-	State        string
-	PublishedAt  time.Time
-	HasPublish   bool
-	FilePath     string
-	EnclosureURL string
-	PodcastID    string
-	PodcastTitle string
+type Dependencies struct {
+	HTTPClient *http.Client
+	ITunes     *itunes.Client
+	Sleep      downloads.SleepFunc
 }
 
-// New constructs a new App instance.
+type OPMLImportResult = subscriptions.ImportResult
+
 func New(cfg config.Config, configPath string, db *sql.DB) *App {
 	return NewWithDependencies(cfg, configPath, db, Dependencies{})
 }
 
-// NewWithDependencies constructs an App with optional dependency overrides.
 func NewWithDependencies(cfg config.Config, configPath string, db *sql.DB, deps Dependencies) *App {
 	httpClient := deps.HTTPClient
 	if httpClient == nil {
 		transport := &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: !cfg.TLSVerify,
-			},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: !cfg.TLSVerify},
 		}
 		if proxyURL := strings.TrimSpace(cfg.Proxy); proxyURL != "" {
 			if parsed, err := url.Parse(proxyURL); err == nil {
 				transport.Proxy = http.ProxyURL(parsed)
 			}
 		}
-		httpClient = &http.Client{
-			Timeout:   15 * time.Second,
-			Transport: transport,
-		}
+		httpClient = &http.Client{Timeout: 15 * time.Second, Transport: transport}
 	}
+
 	itunesClient := deps.ITunes
 	if itunesClient == nil {
 		itunesClient = itunes.NewClient(httpClient, "")
 	}
-	sleeper := deps.Sleep
-	if sleeper == nil {
-		sleeper = defaultSleep
-	}
+
+	store := repository.New(db)
+
+	subsSvc := subscriptions.NewService(store, httpClient, itunesClient)
+	episodesSvc := episodes.NewService(store)
+	downloadsSvc := downloads.NewService(cfg, store, httpClient, deps.Sleep)
 
 	application := &App{
-		config:     cfg,
-		configPath: configPath,
-		db:         db,
-		httpClient: httpClient,
-		itunes:     itunesClient,
-		commands:   make(map[string]*command),
-		helpList:   make([]*command, 0, 16),
-		sleep:      sleeper,
+		config:        cfg,
+		configPath:    configPath,
+		db:            db,
+		httpClient:    httpClient,
+		itunes:        itunesClient,
+		commands:      make(map[string]*command),
+		helpList:      make([]*command, 0, 16),
+		subscriptions: subsSvc,
+		episodes:      episodesSvc,
+		downloads:     downloadsSvc,
 	}
 	application.registerCommands()
+
 	workers := cfg.ParallelDownloads
 	if workers < 0 {
 		workers = 0
 	}
 	if workers > 0 {
-		application.downloadMgr = newDownloadManager(application, workers)
+		application.downloadMgr = downloads.NewManager(downloadsSvc, episodesSvc, workers)
 		application.downloadMgr.Notify()
 	}
+
 	return application
 }
 
-// Config returns a copy of the active configuration.
 func (a *App) Config() config.Config {
 	return a.config
 }
 
-// CommandNames returns a list of all registered command names (including aliases).
 func (a *App) CommandNames() []string {
 	names := make([]string, 0, len(a.commands))
 	for name := range a.commands {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 	return names
 }
 
-// Close releases background resources associated with the App.
 func (a *App) Close() error {
 	if a.downloadMgr != nil {
 		a.downloadMgr.Stop()
 	}
+	if a.db != nil {
+		return a.db.Close()
+	}
 	return nil
 }
 
-// Execute processes a single REPL command string.
 func (a *App) Execute(ctx context.Context, input string) (CommandResult, error) {
-	trimmed := strings.TrimSpace(input)
-	if trimmed == "" {
+	input = strings.TrimSpace(input)
+	if input == "" {
 		return CommandResult{}, nil
 	}
 
-	parts, err := shellquote.Split(trimmed)
+	args, err := shellquote.Split(input)
 	if err != nil {
-		return CommandResult{}, fmt.Errorf("parse command: %w", err)
+		return CommandResult{}, err
 	}
-	if len(parts) == 0 {
+	if len(args) == 0 {
 		return CommandResult{}, nil
 	}
 
-	key := strings.ToLower(parts[0])
-	cmd, ok := a.commands[key]
+	cmdName := strings.ToLower(args[0])
+	cmd, ok := a.commands[cmdName]
 	if !ok {
-		return CommandResult{Message: fmt.Sprintf("unknown command: %s", parts[0])}, nil
+		return CommandResult{Message: fmt.Sprintf("unknown command: %s", args[0])}, nil
 	}
 
-	return cmd.handler(ctx, parts[1:])
+	return cmd.handler(ctx, args[1:])
 }
 
-// LookupPodcast retrieves full podcast metadata from iTunes by ID.
 func (a *App) LookupPodcast(ctx context.Context, id string) (itunes.Podcast, error) {
 	return a.itunes.LookupPodcast(ctx, id)
+}
+
+func (a *App) registerCommands() {
+	a.registerCommand("help", "help [command]", "Show information about available commands", a.helpCommand, "?")
+	a.registerCommand("config", "config [show]", "View or edit application configuration", a.configCommand)
+	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
+	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
+	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
+	a.registerCommand("episodes", "episodes", "View recent episodes across subscriptions", a.episodesCommand, "e", "le")
+	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
+	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
+	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
+	a.registerCommand("import", "import <file>", "Import subscriptions from an OPML file", a.importCommand)
+	a.registerCommand("export", "export <file>", "Export subscriptions to an OPML file", a.exportCommand)
+}
+
+func (a *App) registerCommand(name, usage, summary string, handler commandHandler, aliases ...string) {
+	cmd := &command{usage: usage, summary: summary, handler: handler}
+	names := append([]string{name}, aliases...)
+	for _, alias := range names {
+		a.commands[alias] = cmd
+	}
+	a.helpList = append(a.helpList, cmd)
+}
+
+func (a *App) helpCommand(_ context.Context, args []string) (CommandResult, error) {
+	if len(args) == 0 {
+		builder := strings.Builder{}
+		builder.WriteString("Available commands:\n")
+		for _, cmd := range a.helpList {
+			builder.WriteString(fmt.Sprintf("  %s\t%s\n", cmd.usage, cmd.summary))
+		}
+		return CommandResult{Message: builder.String()}, nil
+	}
+
+	name := strings.ToLower(args[0])
+	cmd, ok := a.commands[name]
+	if !ok {
+		return CommandResult{Message: fmt.Sprintf("unknown command: %s", name)}, nil
+	}
+	return CommandResult{Message: fmt.Sprintf("%s\n%s", cmd.usage, cmd.summary)}, nil
+}
+
+func (a *App) configCommand(ctx context.Context, args []string) (CommandResult, error) {
+	if len(args) == 0 {
+		return CommandResult{Message: "Usage: config [show]"}, nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "show":
+		data, err := yaml.Marshal(a.config)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		return CommandResult{Message: string(data)}, nil
+	default:
+		return a.editConfig(ctx)
+	}
 }
 
 func (a *App) editConfig(ctx context.Context) (CommandResult, error) {
@@ -262,23 +267,24 @@ func (a *App) editConfig(ctx context.Context) (CommandResult, error) {
 	return CommandResult{Message: "Configuration saved."}, nil
 }
 
+func (a *App) exitCommand(_ context.Context, _ []string) (CommandResult, error) {
+	return CommandResult{Quit: true}, nil
+}
+
 func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, error) {
 	if len(args) == 0 {
 		return CommandResult{Message: "Usage: search <query>"}, nil
 	}
 
 	term := strings.Join(args, " ")
-	// Request more results to improve fuzzy matching
 	results, err := a.itunes.Search(ctx, term, 25)
 	if err != nil {
 		return CommandResult{}, err
 	}
-
 	if len(results) == 0 {
 		return CommandResult{Message: "No podcasts found."}, nil
 	}
 
-	// Score and filter results using fuzzy matching
 	type scoredResult struct {
 		podcast itunes.Podcast
 		score   float64
@@ -286,47 +292,39 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 
 	scored := make([]scoredResult, 0, len(results))
 	for _, r := range results {
-		// Calculate match score based on title and author
 		titleScore := fuzzy.MatchScore(r.Title, term)
-		authorScore := fuzzy.MatchScore(r.Author, term) * 0.5 // Author match is less important
-
+		authorScore := fuzzy.MatchScore(r.Author, term) * 0.5
 		maxScore := titleScore
 		if authorScore > maxScore {
 			maxScore = authorScore
 		}
-
-		// Only include results with reasonable match score
 		if maxScore > 0.3 {
 			scored = append(scored, scoredResult{podcast: r, score: maxScore})
 		}
 	}
-
 	if len(scored) == 0 {
 		return CommandResult{Message: "No podcasts found."}, nil
 	}
 
-	// Sort by score (highest first)
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].score > scored[j].score
 	})
 
-	// Limit to top 10 results
 	maxResults := 10
 	if len(scored) < maxResults {
 		maxResults = len(scored)
 	}
 
-	// Return interactive search results only
 	searchResults := make([]SearchResult, maxResults)
 	for i := 0; i < maxResults; i++ {
-		isSubscribed, _, err := a.subscriptionExists(ctx, scored[i].podcast.ID)
+		subscribed, _, err := a.subscriptions.IsSubscribed(ctx, scored[i].podcast.ID)
 		if err != nil {
 			return CommandResult{}, err
 		}
 		searchResults[i] = SearchResult{
 			Podcast:      scored[i].podcast,
 			Score:        scored[i].score,
-			IsSubscribed: isSubscribed,
+			IsSubscribed: subscribed,
 		}
 	}
 
@@ -339,150 +337,41 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 }
 
 func (a *App) SubscribePodcast(ctx context.Context, podcast itunes.Podcast) (CommandResult, error) {
-	podcastID := strings.TrimSpace(podcast.ID)
-	if podcastID == "" {
-		return CommandResult{Message: "Podcast ID cannot be empty."}, nil
-	}
-
-	if exists, title, err := a.subscriptionExists(ctx, podcastID); err != nil {
-		return CommandResult{}, err
-	} else if exists {
-		if title == "" {
-			title = podcast.Title
-		}
-		if title == "" {
-			title = podcastID
-		}
-		return CommandResult{Message: fmt.Sprintf("Already subscribed to %s.", title)}, nil
-	}
-
-	meta := podcast
-	if strings.TrimSpace(meta.FeedURL) == "" {
-		var err error
-		meta, err = a.itunes.LookupPodcast(ctx, podcastID)
-		if err != nil {
+	result, err := a.subscriptions.Subscribe(ctx, podcast)
+	if err != nil {
+		switch {
+		case errors.Is(err, subscriptions.ErrMissingPodcastID):
+			return CommandResult{Message: "Podcast ID cannot be empty."}, nil
+		case errors.Is(err, subscriptions.ErrAlreadySubscribed):
+			title := result.Title
+			if title == "" {
+				title = strings.TrimSpace(podcast.Title)
+			}
+			if title == "" {
+				title = strings.TrimSpace(podcast.ID)
+			}
+			return CommandResult{Message: fmt.Sprintf("Already subscribed to %s.", title)}, nil
+		case errors.Is(err, subscriptions.ErrMissingFeedURL):
+			return CommandResult{}, err
+		default:
 			return CommandResult{}, err
 		}
 	}
-	if strings.TrimSpace(meta.FeedURL) == "" {
-		return CommandResult{}, fmt.Errorf("podcast feed URL missing")
-	}
-
-	feedInfo, episodes, err := feeds.Fetch(ctx, a.httpClient, meta.FeedURL)
-	if err != nil {
-		return CommandResult{}, err
-	}
-	title := strings.TrimSpace(feedInfo.Title)
-	if title == "" {
-		title = strings.TrimSpace(meta.Title)
-	}
-	if title == "" {
-		title = podcastID
-	}
-
-	added, err := a.storeSubscription(ctx, meta, feedInfo, episodes)
-	if err != nil {
-		return CommandResult{}, err
-	}
-
-	return CommandResult{Message: fmt.Sprintf("Subscribed to %s (%d new episodes).", title, added)}, nil
+	return CommandResult{Message: fmt.Sprintf("Subscribed to %s (%d new episodes).", result.Title, result.Added)}, nil
 }
 
 func (a *App) UnsubscribePodcast(ctx context.Context, podcastID string) (CommandResult, error) {
-	podcastID = strings.TrimSpace(podcastID)
-	if podcastID == "" {
-		return CommandResult{Message: "Podcast ID cannot be empty."}, nil
-	}
-
-	res, err := a.db.ExecContext(ctx, "DELETE FROM podcasts WHERE id = ?", podcastID)
+	ok, err := a.subscriptions.Unsubscribe(ctx, podcastID)
 	if err != nil {
+		if errors.Is(err, subscriptions.ErrMissingPodcastID) {
+			return CommandResult{Message: "Podcast ID cannot be empty."}, nil
+		}
 		return CommandResult{}, err
 	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return CommandResult{}, err
-	}
-	if affected == 0 {
+	if !ok {
 		return CommandResult{Message: "No subscription found for that podcast."}, nil
 	}
 	return CommandResult{Message: "Subscription removed."}, nil
-}
-
-func (a *App) registerCommands() {
-	a.registerCommand("help", "help [command]", "Show information about available commands", a.helpCommand, "?")
-	a.registerCommand("config", "config [show]", "View or edit application configuration", a.configCommand)
-	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
-	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
-	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
-	a.registerCommand("episodes", "episodes", "View recent episodes across subscriptions", a.episodesCommand, "e", "le")
-	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
-	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
-	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
-}
-
-func (a *App) registerCommand(name, usage, summary string, handler commandHandler, aliases ...string) {
-	key := strings.ToLower(name)
-	cmd := &command{usage: usage, summary: summary, handler: handler}
-	a.commands[key] = cmd
-	a.helpList = append(a.helpList, cmd)
-	for _, alias := range aliases {
-		a.commands[strings.ToLower(alias)] = cmd
-	}
-}
-
-func (a *App) helpCommand(_ context.Context, args []string) (CommandResult, error) {
-	if len(args) > 0 {
-		key := strings.ToLower(args[0])
-		if cmd, ok := a.commands[key]; ok {
-			return CommandResult{Message: fmt.Sprintf("%s\n  %s", cmd.usage, cmd.summary)}, nil
-		}
-		return CommandResult{Message: fmt.Sprintf("unknown command: %s", args[0])}, nil
-	}
-
-	var builder strings.Builder
-	builder.WriteString("Available commands:\n")
-
-	maxUsage := 0
-	seen := make(map[*command]struct{})
-	for _, cmd := range a.helpList {
-		if _, ok := seen[cmd]; ok {
-			continue
-		}
-		seen[cmd] = struct{}{}
-		if len(cmd.usage) > maxUsage {
-			maxUsage = len(cmd.usage)
-		}
-	}
-
-	seen = make(map[*command]struct{})
-	for _, cmd := range a.helpList {
-		if _, ok := seen[cmd]; ok {
-			continue
-		}
-		seen[cmd] = struct{}{}
-		builder.WriteString("  ")
-		builder.WriteString(fmt.Sprintf("%-*s  %s\n", maxUsage, cmd.usage, cmd.summary))
-	}
-
-	return CommandResult{Message: strings.TrimRight(builder.String(), "\n")}, nil
-}
-
-func (a *App) configCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) > 0 {
-		if strings.EqualFold(args[0], "show") {
-			rendered, err := yaml.Marshal(a.config)
-			if err != nil {
-				return CommandResult{}, fmt.Errorf("render config: %w", err)
-			}
-			return CommandResult{Message: fmt.Sprintf("Current configuration:\n%s", strings.TrimSpace(string(rendered)))}, nil
-		}
-		return CommandResult{Message: "Usage: config [show]"}, nil
-	}
-	return a.editConfig(ctx)
-}
-
-func (a *App) exitCommand(_ context.Context, _ []string) (CommandResult, error) {
-	return CommandResult{Quit: true}, nil
 }
 
 func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, error) {
@@ -492,7 +381,7 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 
 	switch strings.ToLower(args[0]) {
 	case "subscriptions":
-		summaries, err := a.fetchSubscriptionSummaries(ctx)
+		summaries, err := a.subscriptions.Summaries(ctx)
 		if err != nil {
 			return CommandResult{}, err
 		}
@@ -500,17 +389,15 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 			return CommandResult{Message: "No subscriptions yet."}, nil
 		}
 
-		// Apply optional filter
 		if len(args) > 1 {
 			filter := strings.Join(args[1:], " ")
-			filtered := make([]subscriptionSummary, 0)
+			filtered := make([]domain.SubscriptionSummary, 0, len(summaries))
 			for _, s := range summaries {
 				if fuzzy.ContainsFuzzy(s.Title, filter) || fuzzy.ContainsFuzzy(s.ID, filter) {
 					filtered = append(filtered, s)
 				}
 			}
 			summaries = filtered
-
 			if len(summaries) == 0 {
 				return CommandResult{Message: fmt.Sprintf("No subscriptions matching '%s'.", filter)}, nil
 			}
@@ -546,7 +433,7 @@ func (a *App) episodesCommand(ctx context.Context, args []string) (CommandResult
 		return CommandResult{Message: "Usage: episodes"}, nil
 	}
 
-	episodes, err := a.fetchAllEpisodes(ctx)
+	episodes, err := a.episodes.List(ctx)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -554,7 +441,7 @@ func (a *App) episodesCommand(ctx context.Context, args []string) (CommandResult
 		return CommandResult{Message: "No episodes recorded yet."}, nil
 	}
 
-	if err := a.markAllEpisodesSeen(ctx); err != nil {
+	if err := a.episodes.MarkAllSeen(ctx); err != nil {
 		return CommandResult{}, err
 	}
 
@@ -570,7 +457,7 @@ func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, e
 		return CommandResult{Message: "Episode ID cannot be empty."}, nil
 	}
 
-	info, err := a.fetchEpisodeInfo(ctx, episodeID)
+	info, err := a.episodes.FetchEpisodeInfo(ctx, episodeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return CommandResult{Message: "Episode not found."}, nil
@@ -585,8 +472,11 @@ func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, e
 		return CommandResult{Message: "Episode is already queued."}, nil
 	}
 
-	if err := a.enqueueEpisode(ctx, info.ID); err != nil {
+	if err := a.downloads.EnqueueEpisode(ctx, info.ID); err != nil {
 		return CommandResult{}, err
+	}
+	if a.downloadMgr != nil {
+		a.downloadMgr.Notify()
 	}
 
 	if info.State == stateDownloaded {
@@ -604,7 +494,7 @@ func (a *App) downloadCommand(ctx context.Context, args []string) (CommandResult
 		return CommandResult{Message: "Episode ID cannot be empty."}, nil
 	}
 
-	info, err := a.fetchEpisodeInfo(ctx, episodeID)
+	info, err := a.episodes.FetchEpisodeInfo(ctx, episodeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return CommandResult{Message: "Episode not found."}, nil
@@ -619,7 +509,7 @@ func (a *App) downloadCommand(ctx context.Context, args []string) (CommandResult
 	}
 
 	isRedownload := info.State == stateDownloaded
-	finalPath, err := a.downloadEpisode(ctx, info)
+	finalPath, err := a.downloads.DownloadEpisode(ctx, info)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -639,7 +529,7 @@ func (a *App) ignoreCommand(ctx context.Context, args []string) (CommandResult, 
 		return CommandResult{Message: "Episode ID cannot be empty."}, nil
 	}
 
-	info, err := a.fetchEpisodeInfo(ctx, episodeID)
+	info, err := a.episodes.FetchEpisodeInfo(ctx, episodeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return CommandResult{Message: "Episode not found."}, nil
@@ -649,928 +539,58 @@ func (a *App) ignoreCommand(ctx context.Context, args []string) (CommandResult, 
 
 	switch info.State {
 	case stateIgnored:
-		if err := a.updateEpisodeState(ctx, info.ID, stateSeen); err != nil {
+		if err := a.episodes.UpdateEpisodeState(ctx, info.ID, stateSeen); err != nil {
 			return CommandResult{}, err
 		}
 		return CommandResult{Message: fmt.Sprintf("Episode %s unignored.", info.ID)}, nil
 	default:
-		if err := a.removeFromQueue(ctx, info.ID); err != nil {
+		if err := a.downloads.RemoveFromQueue(ctx, info.ID); err != nil {
 			return CommandResult{}, err
 		}
-		if err := a.updateEpisodeState(ctx, info.ID, stateIgnored); err != nil {
+		if err := a.episodes.UpdateEpisodeState(ctx, info.ID, stateIgnored); err != nil {
 			return CommandResult{}, err
 		}
 		return CommandResult{Message: fmt.Sprintf("Episode %s ignored.", info.ID)}, nil
 	}
 }
 
-// ErrNoSubscriptionsToExport indicates that the database contains no
-// subscriptions to export to OPML.
-var ErrNoSubscriptionsToExport = errors.New("no subscriptions to export")
-
-// ErrNoSubscriptionsInOPML indicates that an OPML file did not contain any
-// subscriptions to import.
-var ErrNoSubscriptionsInOPML = errors.New("no subscriptions found in OPML file")
-
-// OPMLImportResult captures the outcome of importing subscriptions from an
-// OPML file.
-type OPMLImportResult struct {
-	Imported int
-	Skipped  int
-	Errors   []string
+func (a *App) exportCommand(ctx context.Context, args []string) (CommandResult, error) {
+	if len(args) != 1 {
+		return CommandResult{Message: "Usage: export <file>"}, nil
+	}
+	count, err := a.ExportOPML(ctx, args[0])
+	if err != nil {
+		return CommandResult{}, err
+	}
+	return CommandResult{Message: fmt.Sprintf("Exported %d subscriptions.", count)}, nil
 }
 
-// ExportOPML writes the current subscriptions to an OPML file at the provided
-// path.
+func (a *App) importCommand(ctx context.Context, args []string) (CommandResult, error) {
+	if len(args) != 1 {
+		return CommandResult{Message: "Usage: import <file>"}, nil
+	}
+	result, err := a.ImportOPML(ctx, args[0])
+	if err != nil {
+		return CommandResult{}, err
+	}
+	msg := fmt.Sprintf("Imported %d subscriptions", result.Imported)
+	if result.Skipped > 0 {
+		msg += fmt.Sprintf(", skipped %d", result.Skipped)
+	}
+	if len(result.Errors) > 0 {
+		msg += fmt.Sprintf(", %d errors", len(result.Errors))
+	}
+	return CommandResult{Message: msg}, nil
+}
+
 func (a *App) ExportOPML(ctx context.Context, filePath string) (int, error) {
-	filePath = strings.TrimSpace(filePath)
-	if filePath == "" {
-		return 0, errors.New("file path cannot be empty")
-	}
-
-	rows, err := a.db.QueryContext(ctx, "SELECT id, title, feed_url FROM podcasts ORDER BY LOWER(title)")
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-
-	var subs []opml.Subscription
-	for rows.Next() {
-		var id, title, feedURL string
-		if err := rows.Scan(&id, &title, &feedURL); err != nil {
-			return 0, err
-		}
-		subs = append(subs, opml.Subscription{
-			Title:   title,
-			FeedURL: feedURL,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	if len(subs) == 0 {
-		return 0, ErrNoSubscriptionsToExport
-	}
-
-	file, err := os.Create(filePath)
-	if err != nil {
-		return 0, fmt.Errorf("create file: %w", err)
-	}
-	defer file.Close()
-
-	if err := opml.Export(file, subs); err != nil {
-		return 0, err
-	}
-
-	return len(subs), nil
+	return a.subscriptions.ExportOPML(ctx, filePath)
 }
 
-// ImportOPML loads subscriptions from an OPML file at the provided path.
 func (a *App) ImportOPML(ctx context.Context, filePath string) (OPMLImportResult, error) {
-	filePath = strings.TrimSpace(filePath)
-	if filePath == "" {
-		return OPMLImportResult{}, errors.New("file path cannot be empty")
-	}
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return OPMLImportResult{}, fmt.Errorf("open file: %w", err)
-	}
-	defer file.Close()
-
-	subs, err := opml.Import(file)
-	if err != nil {
-		return OPMLImportResult{}, err
-	}
-	if len(subs) == 0 {
-		return OPMLImportResult{}, ErrNoSubscriptionsInOPML
-	}
-
-	var result OPMLImportResult
-	for _, sub := range subs {
-		// Check if already subscribed
-		var count int
-		err := a.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM podcasts WHERE feed_url = ?", sub.FeedURL).Scan(&count)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", sub.Title, err))
-			continue
-		}
-		if count > 0 {
-			result.Skipped++
-			continue
-		}
-
-		feedInfo, episodes, err := feeds.Fetch(ctx, a.httpClient, sub.FeedURL)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", sub.Title, err))
-			continue
-		}
-
-		podcastID := fmt.Sprintf("opml-%x", sha256.Sum256([]byte(sub.FeedURL)))[:16]
-
-		title := feedInfo.Title
-		if title == "" {
-			title = sub.Title
-		}
-		if title == "" {
-			title = "Untitled Podcast"
-		}
-
-		meta := itunes.Podcast{
-			ID:      podcastID,
-			Title:   title,
-			FeedURL: sub.FeedURL,
-		}
-		if _, err = a.storeSubscription(ctx, meta, feedInfo, episodes); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", title, err))
-			continue
-		}
-
-		result.Imported++
-	}
-
-	return result, nil
+	return a.subscriptions.ImportOPML(ctx, filePath)
 }
 
-func (a *App) subscriptionExists(ctx context.Context, podcastID string) (bool, string, error) {
-	var title string
-	err := a.db.QueryRowContext(ctx, "SELECT title FROM podcasts WHERE id = ?", podcastID).Scan(&title)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, "", nil
-		}
-		return false, "", err
-	}
-	return true, title, nil
-}
-
-func (a *App) storeSubscription(ctx context.Context, meta itunes.Podcast, feedMeta feeds.Podcast, episodes []feeds.Episode) (int, error) {
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	title := strings.TrimSpace(feedMeta.Title)
-	if title == "" {
-		title = strings.TrimSpace(meta.Title)
-	}
-	if title == "" {
-		title = "Untitled Podcast"
-	}
-
-	now := time.Now().UTC()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO podcasts (id, title, feed_url, subscribed_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET title=excluded.title, feed_url=excluded.feed_url, subscribed_at=excluded.subscribed_at`,
-		meta.ID, title, meta.FeedURL, now); err != nil {
-		return 0, err
-	}
-
-	added := 0
-	for _, ep := range episodes {
-		if strings.TrimSpace(ep.Enclosure) == "" {
-			continue
-		}
-		episodeID := strings.TrimSpace(ep.ID)
-		if episodeID == "" {
-			episodeID = fmt.Sprintf("%s-%s", meta.ID, ep.Title)
-		}
-		if episodeID == "" {
-			continue
-		}
-
-		title := strings.TrimSpace(ep.Title)
-		if title == "" {
-			title = "Untitled Episode"
-		}
-		description := strings.TrimSpace(ep.Description)
-		var published interface{}
-		if !ep.PublishedAt.IsZero() {
-			published = ep.PublishedAt.UTC().Format(time.RFC3339Nano)
-		}
-
-		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO episodes
-                        (id, podcast_id, title, description, state, published_at, enclosure_url)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			episodeID, meta.ID, title, description, stateNew, published, ep.Enclosure)
-		if err != nil {
-			return 0, err
-		}
-		if rows, _ := res.RowsAffected(); rows > 0 {
-			added++
-		}
-
-		if _, err := tx.ExecContext(ctx, `UPDATE episodes SET
-                        podcast_id = ?,
-                        title = ?,
-                        description = ?,
-                        enclosure_url = ?,
-                        published_at = COALESCE(?, published_at)
-                        WHERE id = ?`,
-			meta.ID, title, description, ep.Enclosure, published, episodeID); err != nil {
-			return 0, err
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
-		return 0, err
-	}
-	return added, nil
-}
-
-func (a *App) fetchSubscriptionSummaries(ctx context.Context) ([]subscriptionSummary, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT
-            p.id,
-            p.title,
-            COALESCE(SUM(CASE WHEN e.state = ? THEN 1 ELSE 0 END), 0) AS new_count,
-            COALESCE(SUM(CASE WHEN e.state != ? AND e.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS unplayed_count,
-            COUNT(e.id) AS total_count
-        FROM podcasts p
-        LEFT JOIN episodes e ON e.podcast_id = p.id
-        GROUP BY p.id, p.title
-        ORDER BY LOWER(p.title)`, stateNew, stateDownloaded)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	summaries := make([]subscriptionSummary, 0, 8)
-	for rows.Next() {
-		var summary subscriptionSummary
-		if err := rows.Scan(&summary.ID, &summary.Title, &summary.NewCount, &summary.UnplayedCount, &summary.TotalCount); err != nil {
-			return nil, err
-		}
-		summaries = append(summaries, summary)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return summaries, nil
-}
-
-func (a *App) fetchAllEpisodes(ctx context.Context) ([]EpisodeResult, error) {
-	rows, err := a.db.QueryContext(ctx, `
-                SELECT e.id, e.title, e.state, e.published_at, p.id, p.title
-                FROM episodes e
-                JOIN podcasts p ON p.id = e.podcast_id
-                ORDER BY
-                        CASE WHEN e.published_at IS NULL OR e.published_at = '' THEN 1 ELSE 0 END,
-                        e.published_at DESC,
-                        LOWER(p.title),
-                        LOWER(e.title)
-        `)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	results := make([]EpisodeResult, 0, 128)
-	for rows.Next() {
-		var episode episodeRow
-		var podcastID string
-		var podcastTitle string
-		var published sql.NullString
-		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &podcastID, &podcastTitle); err != nil {
-			return nil, err
-		}
-		if published.Valid {
-			if parsed, err := time.Parse(time.RFC3339Nano, published.String); err == nil {
-				episode.PublishedAt = parsed
-				episode.HasPublish = true
-			} else if parsed, err := time.Parse(time.RFC3339, published.String); err == nil {
-				episode.PublishedAt = parsed
-				episode.HasPublish = true
-			}
-		}
-		results = append(results, EpisodeResult{
-			Episode:      episode,
-			PodcastID:    podcastID,
-			PodcastTitle: podcastTitle,
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return results, nil
-}
-
-func (a *App) markAllEpisodesSeen(ctx context.Context) error {
-	_, err := a.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE state = ?", stateSeen, stateNew)
-	return err
-}
-
-func (a *App) fetchEpisodeInfo(ctx context.Context, episodeID string) (episodeInfo, error) {
-	var info episodeInfo
-	var published sql.NullString
-	var filePath sql.NullString
-	var hash sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT e.id, e.title, COALESCE(e.description, ''), e.state, e.published_at, e.file_path, e.enclosure_url, e.hash, p.id, p.title
-        FROM episodes e
-        JOIN podcasts p ON p.id = e.podcast_id
-        WHERE e.id = ?`, episodeID).Scan(&info.ID, &info.Title, &info.Description, &info.State, &published, &filePath, &info.EnclosureURL, &hash, &info.PodcastID, &info.PodcastTitle)
-	if err != nil {
-		return episodeInfo{}, err
-	}
-	if published.Valid {
-		if parsed, err := time.Parse(time.RFC3339Nano, published.String); err == nil {
-			info.PublishedAt = parsed
-			info.HasPublish = true
-		} else if parsed, err := time.Parse(time.RFC3339, published.String); err == nil {
-			info.PublishedAt = parsed
-			info.HasPublish = true
-		}
-	}
-	if filePath.Valid {
-		info.FilePath = filePath.String
-	}
-	if hash.Valid {
-		info.Hash = hash.String
-	}
-	return info, nil
-}
-
-// EpisodeDetails returns detailed information about a specific episode.
 func (a *App) EpisodeDetails(ctx context.Context, episodeID string) (EpisodeDetail, error) {
-	info, err := a.fetchEpisodeInfo(ctx, episodeID)
-	if err != nil {
-		return EpisodeDetail{}, err
-	}
-
-	return EpisodeDetail{
-		ID:           info.ID,
-		Title:        info.Title,
-		Description:  info.Description,
-		State:        info.State,
-		PublishedAt:  info.PublishedAt,
-		HasPublish:   info.HasPublish,
-		FilePath:     info.FilePath,
-		EnclosureURL: info.EnclosureURL,
-		PodcastID:    info.PodcastID,
-		PodcastTitle: info.PodcastTitle,
-	}, nil
-}
-
-func (a *App) enqueueEpisode(ctx context.Context, episodeID string) error {
-	err := withRetry(ctx, func() error {
-		tx, err := a.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback()
-			}
-		}()
-
-		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, retry_count = 0 WHERE id = ?", stateQueued, episodeID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO downloads (episode_id, enqueued_at, priority)
-                VALUES (?, ?, 0)
-                ON CONFLICT(episode_id) DO UPDATE SET enqueued_at = excluded.enqueued_at`, episodeID, time.Now().UTC()); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	if a.downloadMgr != nil {
-		a.downloadMgr.Notify()
-	}
-	return nil
-}
-
-func (a *App) downloadEpisode(ctx context.Context, info episodeInfo) (string, error) {
-	finalPath, err := a.episodeFilePath(info)
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(a.config.TmpDir, 0o755); err != nil {
-		return "", err
-	}
-
-	attempts := a.config.RetryCount + 1
-	if attempts <= 0 {
-		attempts = 1
-	}
-
-	partialPath := a.episodePartialPath(info)
-	var attemptErr error
-	for i := 0; i < attempts; i++ {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
-
-		resultPath, err := a.downloadOnce(ctx, info, finalPath, partialPath)
-		if err == nil {
-			return resultPath, nil
-		}
-
-		attemptErr = err
-		if err := a.incrementRetryCount(ctx, info.ID); err != nil {
-			return "", err
-		}
-
-		if i == attempts-1 {
-			break
-		}
-
-		backoff := time.Second << i
-		maxBackoff := time.Duration(a.config.RetryBackoffMaxSec) * time.Second
-		if maxBackoff > 0 && backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-		if backoff > 0 {
-			if err := a.sleep(ctx, backoff); err != nil {
-				return "", err
-			}
-		}
-	}
-
-	return "", attemptErr
-}
-
-func (a *App) updateEpisodeState(ctx context.Context, episodeID, state string) error {
-	_, err := a.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE id = ?", state, episodeID)
-	return err
-}
-
-func (a *App) removeFromQueue(ctx context.Context, episodeID string) error {
-	_, err := a.db.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID)
-	return err
-}
-
-func (a *App) requeueEpisode(ctx context.Context, episodeID string) error {
-	err := withRetry(ctx, func() error {
-		_, err := a.db.ExecContext(ctx, `INSERT INTO downloads (episode_id, enqueued_at, priority)
-                VALUES (?, ?, 0)
-                ON CONFLICT(episode_id) DO UPDATE SET enqueued_at = excluded.enqueued_at`, episodeID, time.Now().UTC())
-		return err
-	})
-	if err == nil && a.downloadMgr != nil {
-		a.downloadMgr.Notify()
-	}
-	return err
-}
-
-func (a *App) persistDownloadResult(ctx context.Context, episodeID, finalPath, hash string) error {
-	return withRetry(ctx, func() error {
-		tx, err := a.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback()
-			}
-		}()
-
-		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, downloaded_at = ?, file_path = ?, hash = ?, retry_count = 0 WHERE id = ?", stateDownloaded, now, finalPath, hash, episodeID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
-		return nil
-	})
-}
-
-func (a *App) episodeFilePath(info episodeInfo) (string, error) {
-	root := strings.TrimSpace(a.config.DownloadRoot)
-	if root == "" {
-		return "", fmt.Errorf("download root is not configured")
-	}
-	podcastName := safeFilename(info.PodcastTitle)
-	if podcastName == "" {
-		podcastName = "podcast"
-	}
-	episodeName := safeFilename(info.Title)
-	if episodeName == "" {
-		episodeName = safeFilename(info.ID)
-	}
-	if episodeName == "" {
-		episodeName = "episode"
-	}
-	ext := fileExtension(info.EnclosureURL)
-	return filepath.Join(root, podcastName, episodeName+ext), nil
-}
-
-func (a *App) episodePartialPath(info episodeInfo) string {
-	name := safeFilename(info.ID)
-	if name == "" {
-		name = safeFilename(info.Title)
-	}
-	if name == "" {
-		name = "episode"
-	}
-	return filepath.Join(a.config.TmpDir, fmt.Sprintf("podsink-%s.partial", name))
-}
-
-func (a *App) downloadOnce(ctx context.Context, info episodeInfo, finalPath, partialPath string) (string, error) {
-	// Check if file already exists with same hash
-	if _, err := os.Stat(finalPath); err == nil {
-		existingHash, err := computeFileHash(finalPath)
-		if err == nil && existingHash == info.Hash && info.Hash != "" {
-			// File exists with same hash, no need to re-download
-			return finalPath, nil
-		}
-	}
-
-	file, err := os.OpenFile(partialPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return "", err
-	}
-	existingSize := stat.Size()
-	if _, err := file.Seek(existingSize, io.SeekStart); err != nil {
-		return "", err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, info.EnclosureURL, nil)
-	if err != nil {
-		return "", err
-	}
-	if ua := strings.TrimSpace(a.config.UserAgent); ua != "" {
-		req.Header.Set("User-Agent", ua)
-	}
-	if existingSize > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", existingSize))
-	}
-
-	resp, err := a.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("download episode: %w", err)
-	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-		if existingSize > 0 {
-			if err := file.Truncate(0); err != nil {
-				return "", err
-			}
-			if _, err := file.Seek(0, io.SeekStart); err != nil {
-				return "", err
-			}
-		}
-	case http.StatusPartialContent:
-	default:
-		return "", fmt.Errorf("download failed: %s", resp.Status)
-	}
-
-	if _, err := io.Copy(file, resp.Body); err != nil {
-		return "", err
-	}
-	if err := file.Sync(); err != nil {
-		return "", err
-	}
-	if err := file.Close(); err != nil {
-		return "", err
-	}
-
-	// Compute hash of downloaded file
-	hash, err := computeFileHash(partialPath)
-	if err != nil {
-		return "", fmt.Errorf("compute hash: %w", err)
-	}
-
-	// Check if final file exists and has same hash
-	if _, err := os.Stat(finalPath); err == nil {
-		existingHash, err := computeFileHash(finalPath)
-		if err == nil && existingHash == hash {
-			// File already exists with same content, just remove partial
-			os.Remove(partialPath)
-			return finalPath, nil
-		}
-	}
-
-	if err := moveFile(partialPath, finalPath); err != nil {
-		return "", err
-	}
-
-	if err := a.persistDownloadResult(ctx, info.ID, finalPath, hash); err != nil {
-		return "", err
-	}
-
-	return finalPath, nil
-}
-
-func moveFile(src, dst string) error {
-	if err := os.Remove(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if err := os.Rename(src, dst); err != nil {
-		var linkErr *os.LinkError
-		if errors.As(err, &linkErr) && linkErr.Err == syscall.EXDEV {
-			in, err := os.Open(src)
-			if err != nil {
-				return err
-			}
-			defer in.Close()
-
-			out, err := os.Create(dst)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(out, in); err != nil {
-				out.Close()
-				return err
-			}
-			if err := out.Close(); err != nil {
-				return err
-			}
-			if err := os.Remove(src); err != nil {
-				return err
-			}
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-func (a *App) incrementRetryCount(ctx context.Context, episodeID string) error {
-	_, err := a.db.ExecContext(ctx, "UPDATE episodes SET retry_count = retry_count + 1 WHERE id = ?", episodeID)
-	return err
-}
-
-var errNoDownloadTask = errors.New("no download task available")
-
-type downloadManager struct {
-	app    *App
-	wakeCh chan struct{}
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
-func newDownloadManager(app *App, workers int) *downloadManager {
-	ctx, cancel := context.WithCancel(context.Background())
-	manager := &downloadManager{
-		app:    app,
-		wakeCh: make(chan struct{}, workers*2),
-		cancel: cancel,
-	}
-	for i := 0; i < workers; i++ {
-		manager.wg.Add(1)
-		go manager.worker(ctx)
-	}
-	return manager
-}
-
-func (m *downloadManager) Notify() {
-	if m == nil {
-		return
-	}
-	select {
-	case m.wakeCh <- struct{}{}:
-	default:
-	}
-}
-
-func (m *downloadManager) Stop() {
-	if m == nil {
-		return
-	}
-	m.cancel()
-	m.Notify()
-	m.wg.Wait()
-}
-
-func (m *downloadManager) worker(ctx context.Context) {
-	defer m.wg.Done()
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-
-		episodeID, err := m.claimNext(ctx)
-		if err != nil {
-			if errors.Is(err, errNoDownloadTask) {
-				if err := m.waitForWork(ctx); err != nil {
-					return
-				}
-				continue
-			}
-			log.Printf("download queue claim failed: %v", err)
-			if err := waitWithContext(ctx, time.Second); err != nil {
-				return
-			}
-			continue
-		}
-
-		info, err := m.app.fetchEpisodeInfo(ctx, episodeID)
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				log.Printf("download queue fetch info %s: %v", episodeID, err)
-			}
-			continue
-		}
-		if strings.TrimSpace(info.EnclosureURL) == "" {
-			log.Printf("episode %s missing enclosure URL", episodeID)
-			continue
-		}
-		if _, err := m.app.downloadEpisode(ctx, info); err != nil {
-			log.Printf("download %s failed: %v", episodeID, err)
-			if err := m.app.requeueEpisode(ctx, episodeID); err != nil {
-				log.Printf("requeue %s failed: %v", episodeID, err)
-			}
-		}
-	}
-}
-
-func (m *downloadManager) waitForWork(ctx context.Context) error {
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-m.wakeCh:
-		return nil
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (m *downloadManager) claimNext(ctx context.Context) (string, error) {
-	var episodeID string
-	err := withRetry(ctx, func() error {
-		tx, err := m.app.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		committed := false
-		defer func() {
-			if !committed {
-				tx.Rollback()
-			}
-		}()
-
-		episodeID = ""
-		err = tx.QueryRowContext(ctx, `SELECT episode_id FROM downloads ORDER BY priority DESC, enqueued_at LIMIT 1`).Scan(&episodeID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return errNoDownloadTask
-			}
-			return err
-		}
-
-		res, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID)
-		if err != nil {
-			return err
-		}
-		affected, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected == 0 {
-			return errNoDownloadTask
-		}
-
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = true
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return episodeID, nil
-}
-
-func withRetry(ctx context.Context, fn func() error) error {
-	const attempts = 5
-	var err error
-	for i := 0; i < attempts; i++ {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		err = fn()
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, errNoDownloadTask) {
-			return err
-		}
-		if !isSQLiteBusy(err) {
-			return err
-		}
-		backoff := 50 * time.Millisecond * time.Duration(1<<i)
-		if err := waitWithContext(ctx, backoff); err != nil {
-			return err
-		}
-	}
-	return err
-}
-
-func waitWithContext(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			return nil
-		}
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func isSQLiteBusy(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
-}
-
-type sleepFunc func(context.Context, time.Duration) error
-
-func defaultSleep(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func safeFilename(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	cleaned := invalidPathChars.ReplaceAllString(value, "_")
-	cleaned = strings.Trim(cleaned, "._- ")
-	if cleaned == "" {
-		return ""
-	}
-	if len(cleaned) > 128 {
-		cleaned = cleaned[:128]
-	}
-	return cleaned
-}
-
-func fileExtension(rawURL string) string {
-	if rawURL == "" {
-		return ".mp3"
-	}
-	u, err := url.Parse(rawURL)
-	if err == nil {
-		ext := path.Ext(u.Path)
-		if ext != "" && len(ext) <= 10 {
-			return ext
-		}
-	}
-	return ".mp3"
-}
-
-// computeFileHash computes the SHA256 hash of a file.
-func computeFileHash(filePath string) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	hasher := sha256.New()
-	if _, err := io.Copy(hasher, file); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return a.episodes.EpisodeDetails(ctx, episodeID)
 }

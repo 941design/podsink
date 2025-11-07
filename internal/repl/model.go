@@ -15,6 +15,36 @@ import (
 	"podsink/internal/theme"
 )
 
+type searchView struct {
+	active  bool
+	results []app.SearchResult
+	cursor  int
+	title   string
+	hint    string
+	context string
+	details detailView
+}
+
+type detailView struct {
+	active  bool
+	podcast app.SearchResult
+}
+
+type episodeView struct {
+	active  bool
+	results []app.EpisodeResult
+	cursor  int
+	scroll  int
+	details episodeDetailView
+}
+
+type episodeDetailView struct {
+	active bool
+	detail app.EpisodeDetail
+	scroll int
+	lines  []string
+}
+
 type model struct {
 	ctx           context.Context
 	app           *app.App
@@ -25,33 +55,12 @@ type model struct {
 	completions   []string
 	completionIdx int
 	theme         theme.Theme
-	width         int // Terminal width
+	width         int
 
-	// Interactive search list state
-	searchMode    bool
-	searchResults []app.SearchResult
-	searchCursor  int
-	expandedIndex int // -1 means nothing expanded
-	searchTitle   string
-	searchHint    string
-	searchContext string
+	search   searchView
+	episodes episodeView
 
-	// Interactive search details state
-	detailsMode    bool // When true, show single podcast details
-	detailsPodcast app.SearchResult
-
-	// Interactive episode list state
-	episodeMode         bool
-	episodeResults      []app.EpisodeResult
-	episodeCursor       int
-	episodeScroll       int // Scroll offset for windowed view
-	episodeDetailsMode  bool
-	episodeDetail       app.EpisodeDetail
-	episodeDetailScroll int
-	episodeDetailLines  []string
-
-	// Session-level cache for long descriptions
-	longDescCache map[string]string // key: podcast ID, value: long description
+	longDescCache map[string]string
 }
 
 func newModel(ctx context.Context, application *app.App) model {
@@ -86,21 +95,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		// Re-format episode description if in episode details mode
-		if m.episodeDetailsMode {
-			m.episodeDetailLines = formatEpisodeDescription(m.episodeDetail.Description, msg.Width)
-			m.episodeDetailScroll = 0
+		if m.episodes.details.active {
+			m.episodes.details.lines = formatEpisodeDescription(m.episodes.details.detail.Description, msg.Width)
+			m.episodes.details.scroll = 0
 		}
 		return m, nil
 	case tea.KeyMsg:
 		// Handle search details mode navigation
-		if m.detailsMode {
+		if m.search.details.active {
 			switch msg.String() {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
 			case "esc", "x":
 				// Exit details mode, return to search list
-				m.detailsMode = false
+				m.search.details.active = false
 				return m, nil
 			case "s":
 				// Subscribe to podcast
@@ -112,15 +121,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.episodeDetailsMode {
+		if m.episodes.details.active {
 			switch msg.String() {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
 			case "esc", "x":
-				m.episodeDetailsMode = false
-				m.episodeDetailScroll = 0
-				m.episodeDetailLines = nil
+				m.episodes.details.active = false
+				m.episodes.details.scroll = 0
+				m.episodes.details.lines = nil
 				return m, nil
 			case "down", "j":
 				m.adjustEpisodeDetailScroll(1)
@@ -135,7 +144,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.adjustEpisodeDetailScroll(-m.maxEpisodeDescriptionLines())
 				return m, nil
 			case "end":
-				if total := len(m.episodeDetailLines); total > 0 {
+				if total := len(m.episodes.details.lines); total > 0 {
 					max := m.maxEpisodeDescriptionLines()
 					if max <= 0 {
 						max = 12
@@ -144,60 +153,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if maxOffset < 0 {
 						maxOffset = 0
 					}
-					m.episodeDetailScroll = maxOffset
+					m.episodes.details.scroll = maxOffset
 				}
 				return m, nil
 			case "home":
-				m.episodeDetailScroll = 0
+				m.episodes.details.scroll = 0
 				return m, nil
 			}
 			return m, nil
 		}
 
 		// Handle search mode navigation
-		if m.searchMode {
+		if m.search.active {
 			switch msg.String() {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
 			case "esc", "q", "x":
 				// Exit search mode
-				m.searchMode = false
-				m.searchResults = nil
-				m.expandedIndex = -1
-				m.searchTitle = ""
-				m.searchHint = ""
-				m.searchContext = ""
+				m.search.active = false
+				m.search.results = nil
+				m.search.title = ""
+				m.search.hint = ""
+				m.search.context = ""
+				m.search.details = detailView{}
 				m.input.Focus()
 				return m, nil
 			case "up", "k":
-				if m.searchCursor > 0 {
-					m.searchCursor--
+				if m.search.cursor > 0 {
+					m.search.cursor--
 				}
 				return m, nil
 			case "down", "j":
-				if m.searchCursor < len(m.searchResults)-1 {
-					m.searchCursor++
+				if m.search.cursor < len(m.search.results)-1 {
+					m.search.cursor++
 				}
 				return m, nil
 			case "enter":
 				// Enter details mode for selected podcast
-				if m.searchCursor < len(m.searchResults) {
-					m.detailsMode = true
-					m.detailsPodcast = m.searchResults[m.searchCursor]
+				if m.search.cursor < len(m.search.results) {
+					m.search.details.active = true
+					m.search.details.podcast = m.search.results[m.search.cursor]
 
 					// Fetch long description if not already cached
-					podcastID := m.detailsPodcast.Podcast.ID
+					podcastID := m.search.details.podcast.Podcast.ID
 					if _, cached := m.longDescCache[podcastID]; !cached {
 						// Try to fetch the full podcast details from iTunes API
 						if fullPodcast, err := m.app.LookupPodcast(m.ctx, podcastID); err == nil {
 							m.longDescCache[podcastID] = fullPodcast.LongDescription
 							// Update the current podcast with the long description
-							m.detailsPodcast.Podcast.LongDescription = fullPodcast.LongDescription
+							m.search.details.podcast.Podcast.LongDescription = fullPodcast.LongDescription
 						}
 					} else {
 						// Use cached long description
-						m.detailsPodcast.Podcast.LongDescription = m.longDescCache[podcastID]
+						m.search.details.podcast.Podcast.LongDescription = m.longDescCache[podcastID]
 					}
 				}
 				return m, nil
@@ -212,23 +221,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Handle episode mode navigation
-		if m.episodeMode {
+		if m.episodes.active {
 			switch msg.String() {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
 			case "esc", "q", "x":
 				// Exit episode mode
-				m.episodeMode = false
-				m.episodeResults = nil
-				m.episodeDetailsMode = false
-				m.episodeCursor = 0
-				m.episodeScroll = 0
+				m.episodes.active = false
+				m.episodes.results = nil
+				m.episodes.details.active = false
+				m.episodes.cursor = 0
+				m.episodes.scroll = 0
 				m.input.Focus()
 				return m, nil
 			case "enter":
-				if m.episodeCursor < len(m.episodeResults) {
-					selected := m.episodeResults[m.episodeCursor]
+				if m.episodes.cursor < len(m.episodes.results) {
+					selected := m.episodes.results[m.episodes.cursor]
 					detail, err := m.app.EpisodeDetails(m.ctx, selected.Episode.ID)
 					if err != nil {
 						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
@@ -238,30 +247,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "up", "k":
-				if m.episodeCursor > 0 {
-					m.episodeCursor--
+				if m.episodes.cursor > 0 {
+					m.episodes.cursor--
 					// Scroll up when cursor moves above visible window
 					cfg := m.app.Config()
 					maxVisible := cfg.MaxEpisodes
 					if maxVisible <= 0 {
 						maxVisible = 12
 					}
-					if m.episodeCursor < m.episodeScroll {
-						m.episodeScroll = m.episodeCursor
+					if m.episodes.cursor < m.episodes.scroll {
+						m.episodes.scroll = m.episodes.cursor
 					}
 				}
 				return m, nil
 			case "down", "j":
-				if m.episodeCursor < len(m.episodeResults)-1 {
-					m.episodeCursor++
+				if m.episodes.cursor < len(m.episodes.results)-1 {
+					m.episodes.cursor++
 					// Scroll down when cursor moves below visible window
 					cfg := m.app.Config()
 					maxVisible := cfg.MaxEpisodes
 					if maxVisible <= 0 {
 						maxVisible = 12
 					}
-					if m.episodeCursor >= m.episodeScroll+maxVisible {
-						m.episodeScroll = m.episodeCursor - maxVisible + 1
+					if m.episodes.cursor >= m.episodes.scroll+maxVisible {
+						m.episodes.scroll = m.episodes.cursor - maxVisible + 1
 					}
 				}
 				return m, nil
@@ -293,21 +302,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) View() string {
 	// If in details mode, render the podcast details
-	if m.detailsMode {
+	if m.search.details.active {
 		return m.renderSearchDetails()
 	}
 
 	// If in search mode, render the interactive list
-	if m.searchMode {
+	if m.search.active {
 		return m.renderSearchList()
 	}
 
-	if m.episodeDetailsMode {
+	if m.episodes.details.active {
 		return m.renderEpisodeDetails()
 	}
 
 	// If in episode mode, render the episode list
-	if m.episodeMode {
+	if m.episodes.active {
 		return m.renderEpisodeList()
 	}
 
@@ -343,24 +352,25 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 
 	// Check if we got interactive search results
 	if len(result.SearchResults) > 0 {
-		m.searchMode = true
-		m.searchResults = result.SearchResults
-		m.searchCursor = 0
-		m.expandedIndex = -1
-		m.searchTitle = result.SearchTitle
-		m.searchHint = result.SearchHint
-		m.searchContext = result.SearchContext
+		m.search.active = true
+		m.search.results = result.SearchResults
+		m.search.cursor = 0
+		m.search.title = result.SearchTitle
+		m.search.hint = result.SearchHint
+		m.search.context = result.SearchContext
+		m.search.details = detailView{}
 		m.input.Blur()
 		return m, nil
 	}
 
 	// Check if we got interactive episode results
 	if len(result.EpisodeResults) > 0 {
-		m.episodeMode = true
-		m.episodeResults = result.EpisodeResults
-		m.episodeCursor = 0
-		m.episodeScroll = 0
-		m.episodeDetailsMode = false
+		m.episodes.active = true
+		m.episodes.results = result.EpisodeResults
+		m.episodes.cursor = 0
+		m.episodes.scroll = 0
+		m.episodes.details.active = false
+		m.episodes.details = episodeDetailView{}
 		m.input.Blur()
 		return m, nil
 	}
@@ -420,12 +430,12 @@ func (m model) handleSearchSubscribe() (tea.Model, tea.Cmd) {
 	var currentResult *app.SearchResult
 
 	// Get podcast from either details mode or list mode
-	if m.detailsMode {
-		podcast = m.detailsPodcast.Podcast
-		currentResult = &m.detailsPodcast
-	} else if m.searchCursor < len(m.searchResults) {
-		podcast = m.searchResults[m.searchCursor].Podcast
-		currentResult = &m.searchResults[m.searchCursor]
+	if m.search.details.active {
+		podcast = m.search.details.podcast.Podcast
+		currentResult = &m.search.details.podcast
+	} else if m.search.cursor < len(m.search.results) {
+		podcast = m.search.results[m.search.cursor].Podcast
+		currentResult = &m.search.results[m.search.cursor]
 	} else {
 		return m, nil
 	}
@@ -447,20 +457,20 @@ func (m model) handleSearchSubscribe() (tea.Model, tea.Cmd) {
 	if currentResult != nil {
 		currentResult.IsSubscribed = true
 		// If in details mode, update the detailsPodcast
-		if m.detailsMode {
-			m.detailsPodcast.IsSubscribed = true
+		if m.search.details.active {
+			m.search.details.podcast.IsSubscribed = true
 		}
 		// If in list mode, update the search results list
-		if m.searchMode && m.searchCursor < len(m.searchResults) {
-			m.searchResults[m.searchCursor].IsSubscribed = true
+		if m.search.active && m.search.cursor < len(m.search.results) {
+			m.search.results[m.search.cursor].IsSubscribed = true
 		}
 	}
 
 	// Navigation logic after subscribe:
 	// - If in details view, return to list view
 	// - If in list view, stay in list view
-	if m.detailsMode {
-		m.detailsMode = false
+	if m.search.details.active {
+		m.search.details.active = false
 		// Stay in search mode (list view)
 	}
 	// If in list view (not details mode), we do nothing - stay in list view
@@ -473,12 +483,12 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 	var currentResult *app.SearchResult
 
 	// Get podcast from either details mode or list mode
-	if m.detailsMode {
-		podcast = m.detailsPodcast.Podcast
-		currentResult = &m.detailsPodcast
-	} else if m.searchCursor < len(m.searchResults) {
-		podcast = m.searchResults[m.searchCursor].Podcast
-		currentResult = &m.searchResults[m.searchCursor]
+	if m.search.details.active {
+		podcast = m.search.details.podcast.Podcast
+		currentResult = &m.search.details.podcast
+	} else if m.search.cursor < len(m.search.results) {
+		podcast = m.search.results[m.search.cursor].Podcast
+		currentResult = &m.search.results[m.search.cursor]
 	} else {
 		return m, nil
 	}
@@ -500,12 +510,12 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 	if currentResult != nil {
 		currentResult.IsSubscribed = false
 		// If in details mode, update the detailsPodcast
-		if m.detailsMode {
-			m.detailsPodcast.IsSubscribed = false
+		if m.search.details.active {
+			m.search.details.podcast.IsSubscribed = false
 		}
 		// If in list mode, update the search results list
-		if m.searchMode && m.searchCursor < len(m.searchResults) {
-			m.searchResults[m.searchCursor].IsSubscribed = false
+		if m.search.active && m.search.cursor < len(m.search.results) {
+			m.search.results[m.search.cursor].IsSubscribed = false
 		}
 	}
 
@@ -513,22 +523,22 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 	// - If in details view, return to list view
 	// - If listing subscriptions, remove from the list
 	// - Otherwise stay in list view
-	if m.detailsMode {
-		m.detailsMode = false
+	if m.search.details.active {
+		m.search.details.active = false
 	}
 
-	if m.searchContext == "subscriptions" {
-		if m.searchCursor < len(m.searchResults) {
-			m.searchResults = append(m.searchResults[:m.searchCursor], m.searchResults[m.searchCursor+1:]...)
-			if m.searchCursor >= len(m.searchResults) && m.searchCursor > 0 {
-				m.searchCursor--
+	if m.search.context == "subscriptions" {
+		if m.search.cursor < len(m.search.results) {
+			m.search.results = append(m.search.results[:m.search.cursor], m.search.results[m.search.cursor+1:]...)
+			if m.search.cursor >= len(m.search.results) && m.search.cursor > 0 {
+				m.search.cursor--
 			}
 		}
-		if len(m.searchResults) == 0 {
-			m.searchMode = false
-			m.searchTitle = ""
-			m.searchHint = ""
-			m.searchContext = ""
+		if len(m.search.results) == 0 {
+			m.search.active = false
+			m.search.title = ""
+			m.search.hint = ""
+			m.search.context = ""
 			m.input.Focus()
 		}
 	}
@@ -546,11 +556,11 @@ func (m model) renderSearchList() string {
 	subscribedStyle := m.theme.Subscribed
 	unsubscribedStyle := m.theme.Unsubscribed
 
-	title := m.searchTitle
+	title := m.search.title
 	if title == "" {
 		title = "Search Results"
 	}
-	hint := m.searchHint
+	hint := m.search.hint
 	if hint == "" {
 		hint = "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x]/Esc to exit"
 	}
@@ -563,13 +573,13 @@ func (m model) renderSearchList() string {
 	}
 	b.WriteString("\n")
 
-	for i, result := range m.searchResults {
+	for i, result := range m.search.results {
 		podcast := result.Podcast
 		cursor := "  "
 
 		// Choose style based on subscription status and cursor position
 		var style lipgloss.Style
-		if i == m.searchCursor {
+		if i == m.search.cursor {
 			cursor = "→ "
 			style = cursorStyle
 		} else if result.IsSubscribed {
@@ -580,7 +590,7 @@ func (m model) renderSearchList() string {
 
 		// Truncate author if too long
 		author := podcast.Author
-		if m.searchContext == "subscriptions" {
+		if m.search.context == "subscriptions" {
 			author = fmt.Sprintf("new: %d | unplayed: %d | total: %d", result.NewCount, result.UnplayedCount, result.TotalCount)
 		}
 		if author == "" {
@@ -614,11 +624,11 @@ func (m model) renderSearchDetails() string {
 	subscribedStyle := m.theme.Subscribed
 	descStyle := m.theme.Description
 
-	podcast := m.detailsPodcast.Podcast
+	podcast := m.search.details.podcast.Podcast
 
 	b.WriteString(headerStyle.Render("Podcast Details"))
 	b.WriteString("\n")
-	if m.detailsPodcast.IsSubscribed {
+	if m.search.details.podcast.IsSubscribed {
 		b.WriteString(dimStyle.Render("Press [u] to unsubscribe, [x]/Esc to return"))
 	} else {
 		b.WriteString(dimStyle.Render("Press [s] to subscribe, [x]/Esc to return"))
@@ -628,7 +638,7 @@ func (m model) renderSearchDetails() string {
 	// Podcast title with subscription status
 	statusSuffix := ""
 	var titleStyle lipgloss.Style
-	if m.detailsPodcast.IsSubscribed {
+	if m.search.details.podcast.IsSubscribed {
 		statusSuffix = " [subscribed]"
 		titleStyle = subscribedStyle
 	} else {
@@ -649,8 +659,8 @@ func (m model) renderSearchDetails() string {
 		b.WriteString("\n")
 	}
 
-	if m.searchContext == "subscriptions" {
-		b.WriteString(normalStyle.Render(fmt.Sprintf("New: %d | Unplayed: %d | Total: %d", m.detailsPodcast.NewCount, m.detailsPodcast.UnplayedCount, m.detailsPodcast.TotalCount)))
+	if m.search.context == "subscriptions" {
+		b.WriteString(normalStyle.Render(fmt.Sprintf("New: %d | Unplayed: %d | Total: %d", m.search.details.podcast.NewCount, m.search.details.podcast.UnplayedCount, m.search.details.podcast.TotalCount)))
 		b.WriteString("\n")
 	}
 
@@ -704,8 +714,8 @@ func (m model) renderEpisodeList() string {
 		maxVisible = 12
 	}
 
-	totalEpisodes := len(m.episodeResults)
-	start := m.episodeScroll
+	totalEpisodes := len(m.episodes.results)
+	start := m.episodes.scroll
 	end := start + maxVisible
 	if end > totalEpisodes {
 		end = totalEpisodes
@@ -724,12 +734,12 @@ func (m model) renderEpisodeList() string {
 
 	// Only render the visible window
 	for i := start; i < end; i++ {
-		result := m.episodeResults[i]
+		result := m.episodes.results[i]
 		ep := result.Episode
 		cursor := "  "
 		style := normalStyle
 
-		if i == m.episodeCursor {
+		if i == m.episodes.cursor {
 			cursor = "→ "
 			style = cursorStyle
 		}
@@ -756,7 +766,7 @@ func (m model) renderEpisodeList() string {
 func (m model) renderEpisodeDetails() string {
 	var b strings.Builder
 
-	detail := m.episodeDetail
+	detail := m.episodes.details.detail
 	headerStyle := m.theme.Header
 	normalStyle := m.theme.Normal
 	dimStyle := m.theme.Dim
@@ -792,7 +802,7 @@ func (m model) renderEpisodeDetails() string {
 		b.WriteString("\n")
 	}
 
-	if len(m.episodeDetailLines) > 0 {
+	if len(m.episodes.details.lines) > 0 {
 		b.WriteString("\n")
 		b.WriteString(headerStyle.Render("Description:"))
 		b.WriteString("\n")
@@ -801,8 +811,8 @@ func (m model) renderEpisodeDetails() string {
 		if maxLines <= 0 {
 			maxLines = 12
 		}
-		totalLines := len(m.episodeDetailLines)
-		start := m.episodeDetailScroll
+		totalLines := len(m.episodes.details.lines)
+		start := m.episodes.details.scroll
 		maxOffset := totalLines - maxLines
 		if maxOffset < 0 {
 			maxOffset = 0
@@ -819,7 +829,7 @@ func (m model) renderEpisodeDetails() string {
 		}
 
 		for i := start; i < end; i++ {
-			b.WriteString(normalStyle.Render(m.episodeDetailLines[i]))
+			b.WriteString(normalStyle.Render(m.episodes.details.lines[i]))
 			b.WriteString("\n")
 		}
 
@@ -837,10 +847,10 @@ func (m model) renderEpisodeDetails() string {
 }
 
 func (m *model) enterEpisodeDetails(detail app.EpisodeDetail) {
-	m.episodeDetailsMode = true
-	m.episodeDetail = detail
-	m.episodeDetailScroll = 0
-	m.episodeDetailLines = formatEpisodeDescription(detail.Description, m.width)
+	m.episodes.details.active = true
+	m.episodes.details.detail = detail
+	m.episodes.details.scroll = 0
+	m.episodes.details.lines = formatEpisodeDescription(detail.Description, m.width)
 }
 
 func (m model) maxEpisodeDescriptionLines() int {
@@ -855,9 +865,9 @@ func (m model) maxEpisodeDescriptionLines() int {
 }
 
 func (m *model) adjustEpisodeDetailScroll(delta int) {
-	total := len(m.episodeDetailLines)
+	total := len(m.episodes.details.lines)
 	if total == 0 {
-		m.episodeDetailScroll = 0
+		m.episodes.details.scroll = 0
 		return
 	}
 	maxLines := m.maxEpisodeDescriptionLines()
@@ -868,14 +878,14 @@ func (m *model) adjustEpisodeDetailScroll(delta int) {
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
-	newScroll := m.episodeDetailScroll + delta
+	newScroll := m.episodes.details.scroll + delta
 	if newScroll < 0 {
 		newScroll = 0
 	}
 	if newScroll > maxOffset {
 		newScroll = maxOffset
 	}
-	m.episodeDetailScroll = newScroll
+	m.episodes.details.scroll = newScroll
 }
 
 func formatEpisodeDescription(desc string, width int) []string {

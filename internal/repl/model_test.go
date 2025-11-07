@@ -93,24 +93,26 @@ func TestSubscribeNavigationFromListView(t *testing.T) {
 	a := newTestApp(t)
 
 	m := model{
-		ctx:         context.Background(),
-		app:         a,
-		input:       textinput.New(),
-		searchMode:  true,  // In list view
-		detailsMode: false, // Not in details view
-		searchResults: []app.SearchResult{
-			{
-				Podcast: itunes.Podcast{
-					ID:      "12345",
-					Title:   "Test Podcast",
-					Author:  "Test Artist",
-					FeedURL: "http://example.com/feed.xml",
+		ctx:   context.Background(),
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active: true,
+			results: []app.SearchResult{
+				{
+					Podcast: itunes.Podcast{
+						ID:      "12345",
+						Title:   "Test Podcast",
+						Author:  "Test Artist",
+						FeedURL: "http://example.com/feed.xml",
+					},
+					IsSubscribed: false,
 				},
-				IsSubscribed: false,
 			},
+			cursor: 0,
 		},
-		searchCursor: 0,
-		theme:        theme.ForName(a.Config().ColorTheme),
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
 	}
 
 	// Execute
@@ -118,13 +120,13 @@ func TestSubscribeNavigationFromListView(t *testing.T) {
 	m = updatedModel.(model)
 
 	// Assert: Should stay in list view
-	if !m.searchMode {
+	if !m.search.active {
 		t.Error("Expected to stay in search mode (list view) after subscribing from list view")
 	}
-	if m.detailsMode {
+	if m.search.details.active {
 		t.Error("Should not be in details mode after subscribing from list view")
 	}
-	if len(m.searchResults) == 0 {
+	if len(m.search.results) == 0 {
 		t.Error("Search results should not be cleared when subscribing from list view")
 	}
 }
@@ -139,24 +141,26 @@ func TestUnsubscribeNavigationFromListView(t *testing.T) {
 	}
 
 	m := model{
-		ctx:         context.Background(),
-		app:         a,
-		input:       textinput.New(),
-		searchMode:  true,  // In list view
-		detailsMode: false, // Not in details view
-		searchResults: []app.SearchResult{
-			{
-				Podcast: itunes.Podcast{
-					ID:      "12345",
-					Title:   "Test Podcast",
-					Author:  "Test Artist",
-					FeedURL: "http://example.com/feed.xml",
+		ctx:   context.Background(),
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active: true,
+			results: []app.SearchResult{
+				{
+					Podcast: itunes.Podcast{
+						ID:      "12345",
+						Title:   "Test Podcast",
+						Author:  "Test Artist",
+						FeedURL: "http://example.com/feed.xml",
+					},
+					IsSubscribed: true,
 				},
-				IsSubscribed: true,
 			},
+			cursor: 0,
 		},
-		searchCursor: 0,
-		theme:        theme.ForName(a.Config().ColorTheme),
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
 	}
 
 	// Execute
@@ -164,13 +168,13 @@ func TestUnsubscribeNavigationFromListView(t *testing.T) {
 	m = updatedModel.(model)
 
 	// Assert: Should stay in list view
-	if !m.searchMode {
+	if !m.search.active {
 		t.Error("Expected to stay in search mode (list view) after unsubscribing from list view")
 	}
-	if m.detailsMode {
+	if m.search.details.active {
 		t.Error("Should not be in details mode after unsubscribing from list view")
 	}
-	if len(m.searchResults) == 0 {
+	if len(m.search.results) == 0 {
 		t.Error("Search results should not be cleared when unsubscribing from list view")
 	}
 }
@@ -192,24 +196,26 @@ func TestUnsubscribeUpdatesStatusInListView(t *testing.T) {
 	}
 
 	m := model{
-		ctx:         context.Background(),
-		app:         a,
-		input:       textinput.New(),
-		searchMode:  true,
-		detailsMode: false,
-		searchResults: []app.SearchResult{
-			{
-				Podcast: itunes.Podcast{
-					ID:      "12345",
-					Title:   "Test Podcast",
-					Author:  "Test Artist",
-					FeedURL: "http://example.com/feed.xml",
+		ctx:   context.Background(),
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active: true,
+			results: []app.SearchResult{
+				{
+					Podcast: itunes.Podcast{
+						ID:      "12345",
+						Title:   "Test Podcast",
+						Author:  "Test Artist",
+						FeedURL: "http://example.com/feed.xml",
+					},
+					IsSubscribed: true,
 				},
-				IsSubscribed: true,
 			},
+			cursor: 0,
 		},
-		searchCursor: 0,
-		theme:        theme.ForName(a.Config().ColorTheme),
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
 	}
 
 	// Execute
@@ -217,7 +223,7 @@ func TestUnsubscribeUpdatesStatusInListView(t *testing.T) {
 	m = updatedModel.(model)
 
 	// Assert: Subscription status should be updated
-	if m.searchResults[0].IsSubscribed {
+	if m.search.results[0].IsSubscribed {
 		t.Error("Expected IsSubscribed to be false after unsubscribing from list view")
 	}
 }
@@ -239,25 +245,28 @@ func TestEpisodeListEnterShowsDetails(t *testing.T) {
 	}
 
 	m := model{
-		ctx:            ctx,
-		app:            a,
-		input:          textinput.New(),
-		episodeMode:    true,
-		episodeResults: res.EpisodeResults,
-		episodeCursor:  0,
-		theme:          theme.ForName(a.Config().ColorTheme),
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		episodes: episodeView{
+			active:  true,
+			results: res.EpisodeResults,
+			cursor:  0,
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
 	}
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 
-	if !m.episodeDetailsMode {
+	if !m.episodes.details.active {
 		t.Fatal("expected to enter episode details mode after pressing enter")
 	}
-	if m.episodeDetail.ID != res.EpisodeResults[0].Episode.ID {
-		t.Fatalf("expected episode details for %s, got %s", res.EpisodeResults[0].Episode.ID, m.episodeDetail.ID)
+	if m.episodes.details.detail.ID != res.EpisodeResults[0].Episode.ID {
+		t.Fatalf("expected episode details for %s, got %s", res.EpisodeResults[0].Episode.ID, m.episodes.details.detail.ID)
 	}
-	if len(m.episodeDetailLines) == 0 {
+	if len(m.episodes.details.lines) == 0 {
 		t.Fatal("expected episode description lines to be prepared")
 	}
 }
@@ -268,13 +277,18 @@ func TestRenderEpisodeDetailsRespectsMaxLines(t *testing.T) {
 	})
 
 	m := model{
-		ctx:                 context.Background(),
-		app:                 a,
-		theme:               theme.ForName(a.Config().ColorTheme),
-		episodeDetailsMode:  true,
-		episodeDetail:       app.EpisodeDetail{ID: "ep-1", Title: "Episode One"},
-		episodeDetailLines:  []string{"Line 1", "Line 2", "Line 3", "Line 4"},
-		episodeDetailScroll: 0,
+		ctx:   context.Background(),
+		app:   a,
+		theme: theme.ForName(a.Config().ColorTheme),
+		episodes: episodeView{
+			details: episodeDetailView{
+				active: true,
+				detail: app.EpisodeDetail{ID: "ep-1", Title: "Episode One"},
+				lines:  []string{"Line 1", "Line 2", "Line 3", "Line 4"},
+				scroll: 0,
+			},
+		},
+		longDescCache: make(map[string]string),
 	}
 
 	view := m.renderEpisodeDetails()
@@ -288,7 +302,7 @@ func TestRenderEpisodeDetailsRespectsMaxLines(t *testing.T) {
 		t.Fatalf("expected range indicator on first page:\n%s", view)
 	}
 
-	m.episodeDetailScroll = 1
+	m.episodes.details.scroll = 1
 	view = m.renderEpisodeDetails()
 	if !strings.Contains(view, "Line 4") {
 		t.Fatalf("expected line 4 to appear after scrolling:\n%s", view)
@@ -307,41 +321,46 @@ func TestEpisodeDetailsScrollKeys(t *testing.T) {
 	})
 
 	m := model{
-		ctx:                context.Background(),
-		app:                a,
-		theme:              theme.ForName(a.Config().ColorTheme),
-		episodeDetailsMode: true,
-		episodeDetail:      app.EpisodeDetail{ID: "ep-1", Title: "Episode"},
-		episodeDetailLines: []string{"L1", "L2", "L3"},
+		ctx:   context.Background(),
+		app:   a,
+		theme: theme.ForName(a.Config().ColorTheme),
+		episodes: episodeView{
+			details: episodeDetailView{
+				active: true,
+				detail: app.EpisodeDetail{ID: "ep-1", Title: "Episode"},
+				lines:  []string{"L1", "L2", "L3"},
+			},
+		},
+		longDescCache: make(map[string]string),
 	}
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = updated.(model)
-	if m.episodeDetailScroll != 1 {
-		t.Fatalf("expected scroll to advance by one, got %d", m.episodeDetailScroll)
+	if m.episodes.details.scroll != 1 {
+		t.Fatalf("expected scroll to advance by one, got %d", m.episodes.details.scroll)
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	m = updated.(model)
-	if m.episodeDetailScroll != 1 {
-		t.Fatalf("expected scroll to clamp at max offset, got %d", m.episodeDetailScroll)
+	if m.episodes.details.scroll != 1 {
+		t.Fatalf("expected scroll to clamp at max offset, got %d", m.episodes.details.scroll)
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
 	m = updated.(model)
-	if m.episodeDetailScroll != 0 {
-		t.Fatalf("expected scroll to move back to 0, got %d", m.episodeDetailScroll)
+	if m.episodes.details.scroll != 0 {
+		t.Fatalf("expected scroll to move back to 0, got %d", m.episodes.details.scroll)
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	m = updated.(model)
-	if m.episodeDetailScroll != 1 {
-		t.Fatalf("expected pgdown to jump forward, got %d", m.episodeDetailScroll)
+	if m.episodes.details.scroll != 1 {
+		t.Fatalf("expected pgdown to jump forward, got %d", m.episodes.details.scroll)
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
 	m = updated.(model)
-	if m.episodeDetailScroll != 0 {
-		t.Fatalf("expected home to reset scroll, got %d", m.episodeDetailScroll)
+	if m.episodes.details.scroll != 0 {
+		t.Fatalf("expected home to reset scroll, got %d", m.episodes.details.scroll)
 	}
 }

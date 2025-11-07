@@ -1,0 +1,51 @@
+package episodes
+
+import (
+	"context"
+
+	"podsink/internal/domain"
+	"podsink/internal/repository"
+)
+
+type Service struct {
+	store *repository.Store
+}
+
+func NewService(store *repository.Store) *Service {
+	return &Service{store: store}
+}
+
+func (s *Service) List(ctx context.Context) ([]domain.EpisodeResult, error) {
+	return s.store.ListEpisodes(ctx)
+}
+
+func (s *Service) MarkAllSeen(ctx context.Context) error {
+	return s.store.MarkAllEpisodesSeen(ctx)
+}
+
+func (s *Service) FetchEpisodeInfo(ctx context.Context, episodeID string) (domain.EpisodeInfo, error) {
+	return s.store.GetEpisodeInfo(ctx, episodeID)
+}
+
+func (s *Service) EpisodeDetails(ctx context.Context, episodeID string) (domain.EpisodeDetail, error) {
+	info, err := s.store.GetEpisodeInfo(ctx, episodeID)
+	if err != nil {
+		return domain.EpisodeDetail{}, err
+	}
+	return domain.EpisodeDetail{
+		ID:           info.ID,
+		Title:        info.Title,
+		Description:  info.Description,
+		State:        info.State,
+		PublishedAt:  info.PublishedAt,
+		HasPublish:   info.HasPublish,
+		FilePath:     info.FilePath,
+		EnclosureURL: info.EnclosureURL,
+		PodcastID:    info.PodcastID,
+		PodcastTitle: info.PodcastTitle,
+	}, nil
+}
+
+func (s *Service) UpdateEpisodeState(ctx context.Context, episodeID, state string) error {
+	return s.store.UpdateEpisodeState(ctx, episodeID, state)
+}
