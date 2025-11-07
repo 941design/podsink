@@ -279,21 +279,21 @@ func TestPodcastLifecycle(t *testing.T) {
 		t.Fatalf("list output missing subscription: %+v", listResult.SearchResults)
 	}
 
-        episodesResult := exec("episodes")
-        if len(episodesResult.EpisodeResults) != 2 {
-                t.Fatalf("expected 2 episodes, got %d", len(episodesResult.EpisodeResults))
-        }
-        if episodesResult.EpisodeResults[0].Episode.Title != "Episode Two" {
-                t.Fatalf("expected most recent episode first, got %s", episodesResult.EpisodeResults[0].Episode.Title)
-        }
-        if episodesResult.EpisodeResults[0].PodcastTitle != "Example Podcast" {
-                t.Fatalf("expected podcast title to be included, got %s", episodesResult.EpisodeResults[0].PodcastTitle)
-        }
-        foundEp1, foundEp2 := false, false
-        for _, ep := range episodesResult.EpisodeResults {
-                if ep.Episode.Title == "Episode One" {
-                        foundEp1 = true
-                }
+	episodesResult := exec("episodes")
+	if len(episodesResult.EpisodeResults) != 2 {
+		t.Fatalf("expected 2 episodes, got %d", len(episodesResult.EpisodeResults))
+	}
+	if episodesResult.EpisodeResults[0].Episode.Title != "Episode Two" {
+		t.Fatalf("expected most recent episode first, got %s", episodesResult.EpisodeResults[0].Episode.Title)
+	}
+	if episodesResult.EpisodeResults[0].PodcastTitle != "Example Podcast" {
+		t.Fatalf("expected podcast title to be included, got %s", episodesResult.EpisodeResults[0].PodcastTitle)
+	}
+	foundEp1, foundEp2 := false, false
+	for _, ep := range episodesResult.EpisodeResults {
+		if ep.Episode.Title == "Episode One" {
+			foundEp1 = true
+		}
 		if ep.Episode.Title == "Episode Two" {
 			foundEp2 = true
 		}
@@ -303,17 +303,17 @@ func TestPodcastLifecycle(t *testing.T) {
 	}
 
 	if state := episodeState(t, ctx, db, "ep1"); state != stateSeen {
-                t.Fatalf("expected ep1 state %s after viewing episodes, got %s", stateSeen, state)
-        }
+		t.Fatalf("expected ep1 state %s after viewing episodes, got %s", stateSeen, state)
+	}
 
-        usage := exec("episodes 12345")
-        if usage.Message != "Usage: episodes" {
-                t.Fatalf("expected usage message for extra args, got %q", usage.Message)
-        }
+	usage := exec("episodes 12345")
+	if usage.Message != "Usage: episodes" {
+		t.Fatalf("expected usage message for extra args, got %q", usage.Message)
+	}
 
-        if msg := exec("queue ep1").Message; !strings.Contains(msg, "queued") {
-                t.Fatalf("queue output unexpected: %s", msg)
-        }
+	if msg := exec("queue ep1").Message; !strings.Contains(msg, "queued") {
+		t.Fatalf("queue output unexpected: %s", msg)
+	}
 	if state := episodeState(t, ctx, db, "ep1"); state != stateQueued {
 		t.Fatalf("expected ep1 state %s after queue, got %s", stateQueued, state)
 	}

@@ -116,6 +116,7 @@ Failures are logged but do not alter persistent state.
 | `proxy` | optional | HTTP proxy URL |
 | `tls_verify` | true | TLS strictness |
 | `color_theme` | `default` | UI color palette (`default`, `high_contrast`) |
+| `max_episodes` | 12 | Maximum episodes to display in list view |
 
 ### Data Model Highlights
 **Podcast:** `id`, `title`, `feed_url`, `subscribed_at`  
@@ -174,6 +175,7 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
   - DB: SQLite (via modernc.org/sqlite)
   - Network: standard net/http
   - Config: gopkg.in/yaml.v3
+  - HTML to Text: github.com/jaytaylor/html2text
 - **Platforms:** linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
 - **Distribution:** GitHub releases (tar/zip + checksums)
 
@@ -203,8 +205,10 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
 - Subscribing/unsubscribing from either the search results or subscriptions list updates the database immediately and reflects in the UI without requiring podcast IDs.
 
 ### Episodes
-- `episodes` lists all recorded episodes across subscriptions, newest first, with state badges and podcast titles.
-- Pressing `Enter` from the list opens a detailed episode view; `Esc`/`x` returns to the list.
+- `episodes` lists recorded episodes across subscriptions, newest first, with state badges and podcast titles.
+- The view displays a limited number of episodes at once (configurable via `max_episodes`, default: 12) with scrolling support using arrow keys or j/k.
+- When scrolling through a long list, the header shows "showing X-Y of Z" to indicate the current window position.
+- Pressing `Enter` from the list opens a detailed episode view with HTML-formatted descriptions converted to plain text for console display; `Esc`/`x` returns to the list.
 - `queue` transitions episode to `QUEUED`.
 - Successful download → `DOWNLOADED`.
 - Ignore/unignore toggles `IGNORED`/`SEEN`.

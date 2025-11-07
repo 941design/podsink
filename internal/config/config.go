@@ -27,6 +27,7 @@ type Config struct {
 	Proxy              string `yaml:"proxy,omitempty"`
 	TLSVerify          bool   `yaml:"tls_verify"`
 	ColorTheme         string `yaml:"color_theme"`
+	MaxEpisodes        int    `yaml:"max_episodes"`
 }
 
 // Defaults returns the baseline configuration used on first run.
@@ -42,6 +43,7 @@ func Defaults() Config {
 		UserAgent:          "podsink/dev",
 		TLSVerify:          true,
 		ColorTheme:         theme.Default,
+		MaxEpisodes:        12,
 	}
 }
 
@@ -160,6 +162,7 @@ func EditableKeys() []string {
 		"proxy",
 		"tls_verify",
 		"color_theme",
+		"max_episodes",
 	}
 }
 
@@ -236,6 +239,14 @@ func EditInteractive(ctx context.Context, cfg Config) (Config, error) {
 				Default: cfg.ColorTheme,
 			},
 		},
+		{
+			Name: "max_episodes",
+			Prompt: &survey.Input{
+				Message: "Maximum episodes to display in list",
+				Default: fmt.Sprintf("%d", cfg.MaxEpisodes),
+			},
+			Validate: validatePositiveInt,
+		},
 	}
 
 	answers := map[string]interface{}{}
@@ -260,6 +271,7 @@ func EditInteractive(ctx context.Context, cfg Config) (Config, error) {
 	if themeName, ok := answers["color_theme"].(string); ok {
 		cfg.ColorTheme = themeName
 	}
+	cfg.MaxEpisodes = toInt(answers["max_episodes"])
 
 	return cfg, nil
 }

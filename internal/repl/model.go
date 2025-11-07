@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/jaytaylor/html2text"
 
 	"podsink/internal/app"
 	"podsink/internal/itunes"
@@ -42,6 +43,7 @@ type model struct {
 	episodeMode        bool
 	episodeResults     []app.EpisodeResult
 	episodeCursor      int
+	episodeScroll      int // Scroll offset for windowed view
 	episodeDetailsMode bool
 	episodeDetail      app.EpisodeDetail
 
@@ -179,6 +181,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.episodeMode = false
 				m.episodeResults = nil
 				m.episodeDetailsMode = false
+				m.episodeCursor = 0
+				m.episodeScroll = 0
 				m.input.Focus()
 				return m, nil
 			case "enter":
@@ -196,15 +200,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "up", "k":
 				if m.episodeCursor > 0 {
 					m.episodeCursor--
+					// Scroll up when cursor moves above visible window
+					cfg := m.app.Config()
+					maxVisible := cfg.MaxEpisodes
+					if maxVisible <= 0 {
+						maxVisible = 12
+					}
+					if m.episodeCursor < m.episodeScroll {
+						m.episodeScroll = m.episodeCursor
+					}
 				}
 				return m, nil
 			case "down", "j":
 				if m.episodeCursor < len(m.episodeResults)-1 {
 					m.episodeCursor++
+					// Scroll down when cursor moves below visible window
+					cfg := m.app.Config()
+					maxVisible := cfg.MaxEpisodes
+					if maxVisible <= 0 {
+						maxVisible = 12
+					}
+					if m.episodeCursor >= m.episodeScroll+maxVisible {
+						m.episodeScroll = m.episodeCursor - maxVisible + 1
+					}
 				}
 				return m, nil
 			}
-			return m, nil
 		}
 
 		// Normal mode key handling
@@ -298,6 +319,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.episodeMode = true
 		m.episodeResults = result.EpisodeResults
 		m.episodeCursor = 0
+		m.episodeScroll = 0
 		m.episodeDetailsMode = false
 		m.input.Blur()
 		return m, nil
@@ -635,14 +657,34 @@ func (m model) renderEpisodeList() string {
 	stateStyle := m.theme.State
 	dateStyle := m.theme.Date
 
-	if len(m.episodeResults) > 0 {
-		b.WriteString(headerStyle.Render("All Episodes (Newest First)"))
+	// Calculate window bounds
+	cfg := m.app.Config()
+	maxVisible := cfg.MaxEpisodes
+	if maxVisible <= 0 {
+		maxVisible = 12
+	}
+
+	totalEpisodes := len(m.episodeResults)
+	start := m.episodeScroll
+	end := start + maxVisible
+	if end > totalEpisodes {
+		end = totalEpisodes
+	}
+
+	if totalEpisodes > 0 {
+		if totalEpisodes > maxVisible {
+			b.WriteString(headerStyle.Render(fmt.Sprintf("All Episodes (Newest First) - showing %d-%d of %d", start+1, end, totalEpisodes)))
+		} else {
+			b.WriteString(headerStyle.Render(fmt.Sprintf("All Episodes (Newest First) - %d total", totalEpisodes)))
+		}
 		b.WriteString("\n")
 	}
 	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [x]/Esc to exit"))
 	b.WriteString("\n\n")
 
-	for i, result := range m.episodeResults {
+	// Only render the visible window
+	for i := start; i < end; i++ {
+		result := m.episodeResults[i]
 		ep := result.Episode
 		cursor := "  "
 		style := normalStyle
@@ -714,6 +756,15 @@ func (m model) renderEpisodeDetails() string {
 
 	desc := strings.TrimSpace(detail.Description)
 	if desc != "" {
+		// Convert HTML to plain text for better console display
+		plainText, err := html2text.FromString(desc, html2text.Options{
+			PrettyTables: true,
+			OmitLinks:    false,
+		})
+		if err == nil {
+			desc = strings.TrimSpace(plainText)
+		}
+
 		b.WriteString("\n")
 		b.WriteString(headerStyle.Render("Description:"))
 		b.WriteString("\n")

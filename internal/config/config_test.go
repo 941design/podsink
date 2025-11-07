@@ -57,3 +57,31 @@ func TestEnsureCreatesConfig(t *testing.T) {
 		t.Fatalf("expected download directory to be created: %v", err)
 	}
 }
+
+func TestMaxEpisodesDefault(t *testing.T) {
+	cfg := Defaults()
+	if cfg.MaxEpisodes != 12 {
+		t.Fatalf("expected default MaxEpisodes=12, got %d", cfg.MaxEpisodes)
+	}
+}
+
+func TestMaxEpisodesConfigSaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	original := Defaults()
+	original.MaxEpisodes = 20
+
+	if err := Save(path, original); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.MaxEpisodes != 20 {
+		t.Fatalf("MaxEpisodes mismatch: got %d want %d", loaded.MaxEpisodes, 20)
+	}
+}

@@ -65,9 +65,10 @@ podsink> list subscriptions
 # from the highlighted podcast or Enter to view details.
 
 podsink> episodes
-All Episodes (Newest First):
-  [NEW]  2025-01-15  Building Better Go APIs · Go Time
-  [SEEN] 2025-01-08  Concurrency Patterns · Go Time
+All Episodes (Newest First) - showing 1-12 of 147:
+  → [NEW]  2025-01-15  Building Better Go APIs · Go Time
+    [SEEN] 2025-01-08  Concurrency Patterns · Go Time
+# Use ↑↓/jk to scroll through episodes, Enter to view details with formatted descriptions
 
 podsink> download ep-001
 Downloaded Building Better Go APIs to /path/to/downloads/Go_Time/Building_Better_Go_APIs.mp3
@@ -97,7 +98,7 @@ flags `--import-opml <file>` or `--export-opml <file>`.
 
 ### Episode Management
 
-- `episodes` - Browse all recorded episodes (newest first) across your subscriptions
+- `episodes` - Browse all recorded episodes (newest first) across your subscriptions with scrolling support
 - `queue <episode_id>` - Add episode to download queue (background download)
 - `download <episode_id>` - Download episode immediately (foreground)
 - `ignore <episode_id>` - Toggle ignore state (hidden from listings)
@@ -131,6 +132,7 @@ user_agent: podsink/1.0                 # Custom HTTP user agent
 proxy: ""                               # HTTP proxy URL (optional)
 tls_verify: true                        # Verify TLS certificates
 color_theme: default                    # UI color theme (see available options below)
+max_episodes: 12                        # Maximum episodes to display in list view
 ```
 
 Available themes:
@@ -301,3 +303,4 @@ Built with:
 - [Lip Gloss](https://github.com/charmbracelet/lipgloss) - Style definitions
 - [Survey](https://github.com/AlecAivazis/survey) - Interactive prompts
 - [modernc.org/sqlite](https://gitlab.com/cznic/sqlite) - Pure Go SQLite driver
+- [html2text](https://github.com/jaytaylor/html2text) - HTML to plain text conversion
