@@ -131,7 +131,13 @@ retry_backoff_max_seconds: 60           # Max backoff delay between retries
 user_agent: podsink/1.0                 # Custom HTTP user agent
 proxy: ""                               # HTTP proxy URL (optional)
 tls_verify: true                        # Verify TLS certificates
+color_theme: default                    # UI color theme (see available options below)
 ```
+
+Available themes:
+
+- `default` — Balanced dark theme used historically
+- `high_contrast` — Brighter accents and higher contrast for readability
 
 ## Episode States
 
