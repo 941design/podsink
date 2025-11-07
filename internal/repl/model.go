@@ -39,9 +39,11 @@ type model struct {
 	detailsPodcast app.SearchResult
 
 	// Interactive episode list state
-	episodeMode    bool
-	episodeResults []app.EpisodeResult
-	episodeCursor  int
+	episodeMode        bool
+	episodeResults     []app.EpisodeResult
+	episodeCursor      int
+	episodeDetailsMode bool
+	episodeDetail      app.EpisodeDetail
 
 	// Session-level cache for long descriptions
 	longDescCache map[string]string // key: podcast ID, value: long description
@@ -93,6 +95,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "u":
 				// Unsubscribe from podcast
 				return m.handleSearchUnsubscribe()
+			}
+			return m, nil
+		}
+
+		if m.episodeDetailsMode {
+			switch msg.String() {
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			case "esc", "x":
+				m.episodeDetailsMode = false
+				return m, nil
 			}
 			return m, nil
 		}
@@ -164,7 +178,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Exit episode mode
 				m.episodeMode = false
 				m.episodeResults = nil
+				m.episodeDetailsMode = false
 				m.input.Focus()
+				return m, nil
+			case "enter":
+				if m.episodeCursor < len(m.episodeResults) {
+					selected := m.episodeResults[m.episodeCursor]
+					detail, err := m.app.EpisodeDetails(m.ctx, selected.Episode.ID)
+					if err != nil {
+						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						return m, nil
+					}
+					m.episodeDetailsMode = true
+					m.episodeDetail = detail
+				}
 				return m, nil
 			case "up", "k":
 				if m.episodeCursor > 0 {
@@ -212,6 +239,10 @@ func (m model) View() string {
 	// If in search mode, render the interactive list
 	if m.searchMode {
 		return m.renderSearchList()
+	}
+
+	if m.episodeDetailsMode {
+		return m.renderEpisodeDetails()
 	}
 
 	// If in episode mode, render the episode list
@@ -267,6 +298,7 @@ func (m model) handleSubmit() (tea.Model, tea.Cmd) {
 		m.episodeMode = true
 		m.episodeResults = result.EpisodeResults
 		m.episodeCursor = 0
+		m.episodeDetailsMode = false
 		m.input.Blur()
 		return m, nil
 	}
@@ -604,12 +636,10 @@ func (m model) renderEpisodeList() string {
 	dateStyle := m.theme.Date
 
 	if len(m.episodeResults) > 0 {
-		title := m.episodeResults[0].PodcastTitle
-		podcastID := m.episodeResults[0].PodcastID
-		b.WriteString(headerStyle.Render(fmt.Sprintf("Episodes for %s (%s)", title, podcastID)))
+		b.WriteString(headerStyle.Render("All Episodes (Newest First)"))
 		b.WriteString("\n")
 	}
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, [x]/Esc to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [x]/Esc to exit"))
 	b.WriteString("\n\n")
 
 	for i, result := range m.episodeResults {
@@ -631,9 +661,69 @@ func (m model) renderEpisodeList() string {
 		// Format: → [STATE] 2024-01-01 Episode Title
 		line := cursor + stateStyle.Render(fmt.Sprintf("[%-11s]", ep.State)) + " " +
 			dateStyle.Render(published) + " " + style.Render(ep.Title)
+		if result.PodcastTitle != "" {
+			line += " " + dimStyle.Render("· "+result.PodcastTitle)
+		}
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
+
+	return b.String()
+}
+
+func (m model) renderEpisodeDetails() string {
+	var b strings.Builder
+
+	detail := m.episodeDetail
+	headerStyle := m.theme.Header
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+	stateStyle := m.theme.State
+	dateStyle := m.theme.Date
+
+	b.WriteString(headerStyle.Render(detail.Title))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf("Episode ID: %s", detail.ID)))
+	b.WriteString("\n")
+
+	if detail.PodcastTitle != "" {
+		b.WriteString(normalStyle.Render(fmt.Sprintf("Podcast: %s (%s)", detail.PodcastTitle, detail.PodcastID)))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(stateStyle.Render(fmt.Sprintf("State: %s", detail.State)))
+	b.WriteString("\n")
+
+	if detail.HasPublish {
+		b.WriteString(dateStyle.Render("Published: " + detail.PublishedAt.Format("2006-01-02 15:04")))
+		b.WriteString("\n")
+	}
+
+	if detail.FilePath != "" {
+		b.WriteString(normalStyle.Render("Downloaded to: " + detail.FilePath))
+		b.WriteString("\n")
+	} else {
+		b.WriteString(dimStyle.Render("Not downloaded yet"))
+		b.WriteString("\n")
+	}
+
+	if detail.EnclosureURL != "" {
+		b.WriteString(dimStyle.Render("Source: " + detail.EnclosureURL))
+		b.WriteString("\n")
+	}
+
+	desc := strings.TrimSpace(detail.Description)
+	if desc != "" {
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render("Description:"))
+		b.WriteString("\n")
+		b.WriteString(normalStyle.Render(desc))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("Press [x]/Esc to return to the episode list"))
+	b.WriteString("\n")
 
 	return b.String()
 }

@@ -129,6 +129,20 @@ type EpisodeResult struct {
 	PodcastID    string
 }
 
+// EpisodeDetail represents expanded episode metadata for detail views.
+type EpisodeDetail struct {
+	ID           string
+	Title        string
+	Description  string
+	State        string
+	PublishedAt  time.Time
+	HasPublish   bool
+	FilePath     string
+	EnclosureURL string
+	PodcastID    string
+	PodcastTitle string
+}
+
 // New constructs a new App instance.
 func New(cfg config.Config, configPath string, db *sql.DB) *App {
 	return NewWithDependencies(cfg, configPath, db, Dependencies{})
@@ -400,7 +414,7 @@ func (a *App) registerCommands() {
 	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
 	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
 	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
-	a.registerCommand("episodes", "episodes <podcast_id>", "View episodes for a podcast", a.episodesCommand, "e")
+	a.registerCommand("episodes", "episodes", "View recent episodes across subscriptions", a.episodesCommand, "e", "le")
 	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
 	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
 	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
@@ -528,45 +542,23 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 }
 
 func (a *App) episodesCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) != 1 {
-		return CommandResult{Message: "Usage: episodes <podcast_id>"}, nil
-	}
-	podcastID := strings.TrimSpace(args[0])
-	if podcastID == "" {
-		return CommandResult{Message: "Podcast ID cannot be empty."}, nil
+	if len(args) > 0 {
+		return CommandResult{Message: "Usage: episodes"}, nil
 	}
 
-	title, err := a.podcastTitle(ctx, podcastID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return CommandResult{Message: "No subscription found for that podcast."}, nil
-		}
-		return CommandResult{}, err
-	}
-
-	episodes, err := a.fetchEpisodes(ctx, podcastID)
+	episodes, err := a.fetchAllEpisodes(ctx)
 	if err != nil {
 		return CommandResult{}, err
 	}
 	if len(episodes) == 0 {
-		return CommandResult{Message: fmt.Sprintf("No episodes recorded for %s.", title)}, nil
+		return CommandResult{Message: "No episodes recorded yet."}, nil
 	}
 
-	// Return episodes for interactive display
-	results := make([]EpisodeResult, len(episodes))
-	for i, ep := range episodes {
-		results[i] = EpisodeResult{
-			Episode:      ep,
-			PodcastTitle: title,
-			PodcastID:    podcastID,
-		}
-	}
-
-	if err := a.markEpisodesSeen(ctx, podcastID); err != nil {
+	if err := a.markAllEpisodesSeen(ctx); err != nil {
 		return CommandResult{}, err
 	}
 
-	return CommandResult{EpisodeResults: results}, nil
+	return CommandResult{EpisodeResults: episodes}, nil
 }
 
 func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, error) {
@@ -921,66 +913,55 @@ func (a *App) fetchSubscriptionSummaries(ctx context.Context) ([]subscriptionSum
 	return summaries, nil
 }
 
-func (a *App) podcastTitle(ctx context.Context, podcastID string) (string, error) {
-	var title string
-	if err := a.db.QueryRowContext(ctx, "SELECT title FROM podcasts WHERE id = ?", podcastID).Scan(&title); err != nil {
-		return "", err
-	}
-	return title, nil
-}
-
-func (a *App) fetchEpisodes(ctx context.Context, podcastID string) ([]episodeRow, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT id, title, state, published_at FROM episodes WHERE podcast_id = ?`, podcastID)
+func (a *App) fetchAllEpisodes(ctx context.Context) ([]EpisodeResult, error) {
+	rows, err := a.db.QueryContext(ctx, `
+                SELECT e.id, e.title, e.state, e.published_at, p.id, p.title
+                FROM episodes e
+                JOIN podcasts p ON p.id = e.podcast_id
+                ORDER BY
+                        CASE WHEN e.published_at IS NULL OR e.published_at = '' THEN 1 ELSE 0 END,
+                        e.published_at DESC,
+                        LOWER(p.title),
+                        LOWER(e.title)
+        `)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	episodes := make([]episodeRow, 0, 64)
+	results := make([]EpisodeResult, 0, 128)
 	for rows.Next() {
-		var row episodeRow
+		var episode episodeRow
+		var podcastID string
+		var podcastTitle string
 		var published sql.NullString
-		if err := rows.Scan(&row.ID, &row.Title, &row.State, &published); err != nil {
+		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &podcastID, &podcastTitle); err != nil {
 			return nil, err
 		}
 		if published.Valid {
 			if parsed, err := time.Parse(time.RFC3339Nano, published.String); err == nil {
-				row.PublishedAt = parsed
-				row.HasPublish = true
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
 			} else if parsed, err := time.Parse(time.RFC3339, published.String); err == nil {
-				row.PublishedAt = parsed
-				row.HasPublish = true
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
 			}
 		}
-		episodes = append(episodes, row)
+		results = append(results, EpisodeResult{
+			Episode:      episode,
+			PodcastID:    podcastID,
+			PodcastTitle: podcastTitle,
+		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
-	sort.SliceStable(episodes, func(i, j int) bool {
-		a := episodes[i]
-		b := episodes[j]
-		if a.HasPublish && b.HasPublish {
-			if !a.PublishedAt.Equal(b.PublishedAt) {
-				return a.PublishedAt.After(b.PublishedAt)
-			}
-			return strings.ToLower(a.Title) < strings.ToLower(b.Title)
-		}
-		if a.HasPublish {
-			return true
-		}
-		if b.HasPublish {
-			return false
-		}
-		return strings.ToLower(a.Title) < strings.ToLower(b.Title)
-	})
-
-	return episodes, nil
+	return results, nil
 }
 
-func (a *App) markEpisodesSeen(ctx context.Context, podcastID string) error {
-	_, err := a.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE podcast_id = ? AND state = ?", stateSeen, podcastID, stateNew)
+func (a *App) markAllEpisodesSeen(ctx context.Context) error {
+	_, err := a.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE state = ?", stateSeen, stateNew)
 	return err
 }
 
@@ -1012,6 +993,27 @@ func (a *App) fetchEpisodeInfo(ctx context.Context, episodeID string) (episodeIn
 		info.Hash = hash.String
 	}
 	return info, nil
+}
+
+// EpisodeDetails returns detailed information about a specific episode.
+func (a *App) EpisodeDetails(ctx context.Context, episodeID string) (EpisodeDetail, error) {
+	info, err := a.fetchEpisodeInfo(ctx, episodeID)
+	if err != nil {
+		return EpisodeDetail{}, err
+	}
+
+	return EpisodeDetail{
+		ID:           info.ID,
+		Title:        info.Title,
+		Description:  info.Description,
+		State:        info.State,
+		PublishedAt:  info.PublishedAt,
+		HasPublish:   info.HasPublish,
+		FilePath:     info.FilePath,
+		EnclosureURL: info.EnclosureURL,
+		PodcastID:    info.PodcastID,
+		PodcastTitle: info.PodcastTitle,
+	}, nil
 }
 
 func (a *App) enqueueEpisode(ctx context.Context, episodeID string) error {
