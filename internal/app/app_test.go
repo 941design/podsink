@@ -122,8 +122,16 @@ func TestPodcastLifecycle(t *testing.T) {
 		return result
 	}
 
-	if msg := exec("search Example").Message; !strings.Contains(msg, "12345") {
-		t.Fatalf("search output missing podcast id: %s", msg)
+	searchResult := exec("search Example")
+	found := false
+	for _, sr := range searchResult.SearchResults {
+		if sr.Podcast.ID == "12345" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("search results missing podcast id 12345")
 	}
 
 	if msg := exec("subscribe 12345").Message; !strings.Contains(msg, "Subscribed to Example Podcast") {
@@ -142,9 +150,21 @@ func TestPodcastLifecycle(t *testing.T) {
 		t.Fatalf("list output missing subscription: %s", msg)
 	}
 
-	episodesMsg := exec("episodes 12345").Message
-	if !strings.Contains(episodesMsg, "Episode One") || !strings.Contains(episodesMsg, "Episode Two") {
-		t.Fatalf("episodes output missing titles: %s", episodesMsg)
+	episodesResult := exec("episodes 12345")
+	if len(episodesResult.EpisodeResults) != 2 {
+		t.Fatalf("expected 2 episodes, got %d", len(episodesResult.EpisodeResults))
+	}
+	foundEp1, foundEp2 := false, false
+	for _, ep := range episodesResult.EpisodeResults {
+		if ep.Episode.Title == "Episode One" {
+			foundEp1 = true
+		}
+		if ep.Episode.Title == "Episode Two" {
+			foundEp2 = true
+		}
+	}
+	if !foundEp1 || !foundEp2 {
+		t.Fatalf("episodes missing Episode One or Episode Two")
 	}
 
 	if state := episodeState(t, ctx, db, "ep1"); state != stateSeen {
@@ -288,8 +308,16 @@ func TestDownloadRetriesAndResume(t *testing.T) {
 		return result
 	}
 
-	if msg := exec("search Retry").Message; !strings.Contains(msg, podcastID) {
-		t.Fatalf("search output missing id: %s", msg)
+	searchResult := exec("search Retry")
+	found := false
+	for _, sr := range searchResult.SearchResults {
+		if sr.Podcast.ID == podcastID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("search results missing podcast id %s", podcastID)
 	}
 	if msg := exec("subscribe " + podcastID).Message; !strings.Contains(msg, "Subscribed") {
 		t.Fatalf("subscribe output unexpected: %s", msg)
@@ -445,8 +473,16 @@ func TestDownloadQueueProcessesInParallel(t *testing.T) {
 		return result
 	}
 
-	if msg := exec("search Parallel").Message; !strings.Contains(msg, podcastID) {
-		t.Fatalf("search output missing id: %s", msg)
+	searchResult := exec("search Parallel")
+	found := false
+	for _, sr := range searchResult.SearchResults {
+		if sr.Podcast.ID == podcastID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("search results missing podcast id %s", podcastID)
 	}
 	if msg := exec("subscribe " + podcastID).Message; !strings.Contains(msg, "Subscribed") {
 		t.Fatalf("subscribe output unexpected: %s", msg)

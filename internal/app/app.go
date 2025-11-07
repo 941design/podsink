@@ -27,6 +27,7 @@ import (
 
 	"podsink/internal/config"
 	"podsink/internal/feeds"
+	"podsink/internal/fuzzy"
 	"podsink/internal/itunes"
 	"podsink/internal/opml"
 )
@@ -102,8 +103,24 @@ type Dependencies struct {
 
 // CommandResult captures the outcome of executing a command.
 type CommandResult struct {
-	Message string
-	Quit    bool
+	Message        string
+	Quit           bool
+	SearchResults  []SearchResult  // For interactive search display
+	EpisodeResults []EpisodeResult // For interactive episode list display
+}
+
+// SearchResult represents a scored podcast search result
+type SearchResult struct {
+	Podcast      itunes.Podcast
+	Score        float64
+	IsSubscribed bool
+}
+
+// EpisodeResult represents an episode for interactive display
+type EpisodeResult struct {
+	Episode      episodeRow
+	PodcastTitle string
+	PodcastID    string
 }
 
 // New constructs a new App instance.
@@ -207,6 +224,11 @@ func (a *App) Execute(ctx context.Context, input string) (CommandResult, error) 
 	return cmd.handler(ctx, parts[1:])
 }
 
+// LookupPodcast retrieves full podcast metadata from iTunes by ID.
+func (a *App) LookupPodcast(ctx context.Context, id string) (itunes.Podcast, error) {
+	return a.itunes.LookupPodcast(ctx, id)
+}
+
 func (a *App) editConfig(ctx context.Context) (CommandResult, error) {
 	updated, err := config.EditInteractive(ctx, a.config)
 	if err != nil {
@@ -226,7 +248,8 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 	}
 
 	term := strings.Join(args, " ")
-	results, err := a.itunes.Search(ctx, term, 10)
+	// Request more results to improve fuzzy matching
+	results, err := a.itunes.Search(ctx, term, 25)
 	if err != nil {
 		return CommandResult{}, err
 	}
@@ -235,17 +258,59 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 		return CommandResult{Message: "No podcasts found."}, nil
 	}
 
-	var builder strings.Builder
-	builder.WriteString("Search results:\n")
-	for _, r := range results {
-		author := strings.TrimSpace(r.Author)
-		if author == "" {
-			author = "Unknown"
-		}
-		builder.WriteString(fmt.Sprintf("  %s  %s (by %s)\n", r.ID, r.Title, author))
+	// Score and filter results using fuzzy matching
+	type scoredResult struct {
+		podcast itunes.Podcast
+		score   float64
 	}
 
-	return CommandResult{Message: strings.TrimRight(builder.String(), "\n")}, nil
+	scored := make([]scoredResult, 0, len(results))
+	for _, r := range results {
+		// Calculate match score based on title and author
+		titleScore := fuzzy.MatchScore(r.Title, term)
+		authorScore := fuzzy.MatchScore(r.Author, term) * 0.5 // Author match is less important
+
+		maxScore := titleScore
+		if authorScore > maxScore {
+			maxScore = authorScore
+		}
+
+		// Only include results with reasonable match score
+		if maxScore > 0.3 {
+			scored = append(scored, scoredResult{podcast: r, score: maxScore})
+		}
+	}
+
+	if len(scored) == 0 {
+		return CommandResult{Message: "No podcasts found."}, nil
+	}
+
+	// Sort by score (highest first)
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	// Limit to top 10 results
+	maxResults := 10
+	if len(scored) < maxResults {
+		maxResults = len(scored)
+	}
+
+	// Return interactive search results only
+	searchResults := make([]SearchResult, maxResults)
+	for i := 0; i < maxResults; i++ {
+		isSubscribed, _, err := a.subscriptionExists(ctx, scored[i].podcast.ID)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		searchResults[i] = SearchResult{
+			Podcast:      scored[i].podcast,
+			Score:        scored[i].score,
+			IsSubscribed: isSubscribed,
+		}
+	}
+
+	return CommandResult{SearchResults: searchResults}, nil
 }
 
 func (a *App) subscribeCommand(ctx context.Context, args []string) (CommandResult, error) {
@@ -318,11 +383,11 @@ func (a *App) registerCommands() {
 	a.registerCommand("help", "help [command]", "Show information about available commands", a.helpCommand, "?")
 	a.registerCommand("config", "config [show]", "View or edit application configuration", a.configCommand)
 	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
-	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand)
-	a.registerCommand("subscribe", "subscribe <podcast_id>", "Subscribe to a podcast", a.subscribeCommand)
+	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
+	a.registerCommand("subscribe", "subscribe <podcast_id>", "Subscribe to a podcast (use search for interactive mode)", a.subscribeCommand)
 	a.registerCommand("unsubscribe", "unsubscribe <podcast_id>", "Unsubscribe from a podcast", a.unsubscribeCommand)
-	a.registerCommand("list", "list subscriptions", "List all podcast subscriptions", a.listCommand, "ls")
-	a.registerCommand("episodes", "episodes <podcast_id>", "View episodes for a podcast", a.episodesCommand)
+	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
+	a.registerCommand("episodes", "episodes <podcast_id>", "View episodes for a podcast", a.episodesCommand, "e")
 	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
 	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
 	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
@@ -397,7 +462,7 @@ func (a *App) exitCommand(_ context.Context, _ []string) (CommandResult, error) 
 
 func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, error) {
 	if len(args) == 0 {
-		return CommandResult{Message: "Usage: list subscriptions"}, nil
+		return CommandResult{Message: "Usage: list subscriptions [filter]"}, nil
 	}
 
 	switch strings.ToLower(args[0]) {
@@ -408,6 +473,22 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 		}
 		if len(summaries) == 0 {
 			return CommandResult{Message: "No subscriptions yet."}, nil
+		}
+
+		// Apply optional filter
+		if len(args) > 1 {
+			filter := strings.Join(args[1:], " ")
+			filtered := make([]subscriptionSummary, 0)
+			for _, s := range summaries {
+				if fuzzy.ContainsFuzzy(s.Title, filter) || fuzzy.ContainsFuzzy(s.ID, filter) {
+					filtered = append(filtered, s)
+				}
+			}
+			summaries = filtered
+
+			if len(summaries) == 0 {
+				return CommandResult{Message: fmt.Sprintf("No subscriptions matching '%s'.", filter)}, nil
+			}
 		}
 
 		maxID := len("ID")
@@ -460,34 +541,21 @@ func (a *App) episodesCommand(ctx context.Context, args []string) (CommandResult
 		return CommandResult{Message: fmt.Sprintf("No episodes recorded for %s.", title)}, nil
 	}
 
-	maxID := len("ID")
-	maxState := len("STATE")
-	for _, ep := range episodes {
-		if len(ep.ID) > maxID {
-			maxID = len(ep.ID)
+	// Return episodes for interactive display
+	results := make([]EpisodeResult, len(episodes))
+	for i, ep := range episodes {
+		results[i] = EpisodeResult{
+			Episode:      ep,
+			PodcastTitle: title,
+			PodcastID:    podcastID,
 		}
-		if len(ep.State) > maxState {
-			maxState = len(ep.State)
-		}
-	}
-
-	var builder strings.Builder
-	builder.WriteString(fmt.Sprintf("Episodes for %s (%s):\n", title, podcastID))
-	builder.WriteString(fmt.Sprintf("  %-*s  %-*s  %-10s  %s\n", maxID, "ID", maxState, "STATE", "PUBLISHED", "TITLE"))
-	builder.WriteString("  " + strings.Repeat("-", maxID) + "  " + strings.Repeat("-", maxState) + "  ----------  " + strings.Repeat("-", 20) + "\n")
-	for _, ep := range episodes {
-		published := "Unknown"
-		if ep.HasPublish {
-			published = ep.PublishedAt.Format("2006-01-02")
-		}
-		builder.WriteString(fmt.Sprintf("  %-*s  %-*s  %-10s  %s\n", maxID, ep.ID, maxState, ep.State, published, ep.Title))
 	}
 
 	if err := a.markEpisodesSeen(ctx, podcastID); err != nil {
 		return CommandResult{}, err
 	}
 
-	return CommandResult{Message: strings.TrimRight(builder.String(), "\n")}, nil
+	return CommandResult{EpisodeResults: results}, nil
 }
 
 func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, error) {

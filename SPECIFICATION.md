@@ -132,6 +132,24 @@ Failures are logged but do not alter persistent state.
 - Scrollable list views for results and episodes within REPL context.
 - Keyboard shortcuts: ↑↓ navigation, space toggle, Enter select, `d` download, `i` ignore.
 
+### Search & Subscribe Flow
+After running `search <query>`, an interactive list of podcasts is displayed:
+
+**List View:**
+- Navigate with ↑↓ or j/k keys
+- Press `Enter` to view podcast details
+- Press `s` to subscribe directly (stays in list view)
+- Press `u` to unsubscribe directly (stays in list view)
+- Press `Esc` or `q` to exit search mode
+- Subscribed podcasts are shown in green with a `[subscribed]` suffix
+
+**Details View:**
+- Displays full podcast information including description
+- Press `s` to subscribe to the podcast (returns to list view)
+- Press `u` to unsubscribe from the podcast (returns to list view)
+- Press `x` or `Esc` to return to the list view
+- Subscription status is indicated by color (green for subscribed) and `[subscribed]` suffix
+
 ### Config Management
 - `config` command shows editable key-value list.
 - Changes persist immediately to YAML.
@@ -164,7 +182,16 @@ Failures are logged but do not alter persistent state.
 
 ### Search
 - `search "term"` completes within 5s using iTunes API.
-- Selecting podcast fetches and persists feed.
+- Interactive list displays results with subscription status.
+- Pressing `Enter` on a result shows podcast details.
+- Pressing `s` subscribes to the podcast:
+  - From list view: stays in list view
+  - From details view: returns to list view
+- Pressing `u` unsubscribes from the podcast:
+  - From list view: stays in list view
+  - From details view: returns to list view
+- Subscription status is visually indicated by color and `[subscribed]` suffix.
+- Details view shows full podcast information including description.
 
 ### Subscriptions
 - `list subscriptions` shows correct list.

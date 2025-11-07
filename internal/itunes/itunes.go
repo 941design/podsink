@@ -30,14 +30,16 @@ func NewClient(httpClient *http.Client, baseURL string) *Client {
 
 // Podcast represents a podcast returned by the iTunes API.
 type Podcast struct {
-	ID       string
-	Title    string
-	Author   string
-	FeedURL  string
-	Artwork  string
-	Genre    string
-	Country  string
-	Language string
+	ID              string
+	Title           string
+	Author          string
+	FeedURL         string
+	Artwork         string
+	Genre           string
+	Country         string
+	Language        string
+	Description     string
+	LongDescription string
 }
 
 // Search queries the API for podcasts matching the supplied term.
@@ -83,14 +85,16 @@ func (c *Client) Search(ctx context.Context, term string, limit int) ([]Podcast,
 	for _, item := range payload.Results {
 		id := strconv.FormatInt(item.CollectionID, 10)
 		results = append(results, Podcast{
-			ID:       id,
-			Title:    item.CollectionName,
-			Author:   item.ArtistName,
-			FeedURL:  item.FeedURL,
-			Artwork:  item.ArtworkURL100,
-			Genre:    item.PrimaryGenreName,
-			Country:  item.Country,
-			Language: item.Language,
+			ID:              id,
+			Title:           item.CollectionName,
+			Author:          item.ArtistName,
+			FeedURL:         item.FeedURL,
+			Artwork:         item.ArtworkURL100,
+			Genre:           item.PrimaryGenreName,
+			Country:         item.Country,
+			Language:        item.Language,
+			Description:     item.Description,
+			LongDescription: item.LongDescription,
 		})
 	}
 	return results, nil
@@ -132,14 +136,16 @@ func (c *Client) LookupPodcast(ctx context.Context, id string) (Podcast, error) 
 	item := payload.Results[0]
 	idInt := strconv.FormatInt(item.CollectionID, 10)
 	return Podcast{
-		ID:       idInt,
-		Title:    item.CollectionName,
-		Author:   item.ArtistName,
-		FeedURL:  item.FeedURL,
-		Artwork:  item.ArtworkURL100,
-		Genre:    item.PrimaryGenreName,
-		Country:  item.Country,
-		Language: item.Language,
+		ID:              idInt,
+		Title:           item.CollectionName,
+		Author:          item.ArtistName,
+		FeedURL:         item.FeedURL,
+		Artwork:         item.ArtworkURL100,
+		Genre:           item.PrimaryGenreName,
+		Country:         item.Country,
+		Language:        item.Language,
+		Description:     item.Description,
+		LongDescription: item.LongDescription,
 	}, nil
 }
 
@@ -160,4 +166,6 @@ type podcastResult struct {
 	PrimaryGenreName string `json:"primaryGenreName"`
 	Country          string `json:"country"`
 	Language         string `json:"language"`
+	Description      string `json:"description"`
+	LongDescription  string `json:"longDescription"`
 }
