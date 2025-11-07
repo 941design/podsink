@@ -98,7 +98,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
-			case "esc", "q":
+			case "esc", "q", "x":
 				// Exit search mode
 				m.searchMode = false
 				m.searchResults = nil
@@ -155,7 +155,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
-			case "esc", "q":
+			case "esc", "q", "x":
 				// Exit episode mode
 				m.episodeMode = false
 				m.episodeResults = nil
@@ -453,7 +453,7 @@ func (m model) renderSearchList() string {
 	}
 	hint := m.searchHint
 	if hint == "" {
-		hint = "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, Esc to exit"
+		hint = "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x]/Esc to exit"
 	}
 
 	b.WriteString(headerStyle.Render(title))
@@ -604,7 +604,7 @@ func (m model) renderEpisodeList() string {
 		b.WriteString(headerStyle.Render(fmt.Sprintf("Episodes for %s (%s)", title, podcastID)))
 		b.WriteString("\n")
 	}
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Esc to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, [x]/Esc to exit"))
 	b.WriteString("\n\n")
 
 	for i, result := range m.episodeResults {

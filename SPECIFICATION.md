@@ -138,7 +138,7 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
 - Press `Enter` to view podcast details
 - Press `s` to subscribe directly (stays in list view)
 - Press `u` to unsubscribe directly (stays in list view)
-- Press `Esc` or `q` to exit search mode
+- Press `x`, `Esc`, or `q` to exit search mode
 - Subscribed podcasts are shown in green with a `[subscribed]` suffix
 - The `list subscriptions` view shares the same layout, showing only subscribed podcasts with episode counts in the subtitle
 

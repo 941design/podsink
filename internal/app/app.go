@@ -319,7 +319,7 @@ func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, 
 	return CommandResult{
 		SearchResults: searchResults,
 		SearchTitle:   "Search Results",
-		SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, Esc to exit",
+		SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x]/Esc to exit",
 		SearchContext: "search",
 	}, nil
 }
@@ -521,7 +521,7 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 		return CommandResult{
 			SearchResults: results,
 			SearchTitle:   "Subscriptions",
-			SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [u] unsubscribe, Esc to exit",
+			SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [u] unsubscribe, [x]/Esc to exit",
 			SearchContext: "subscriptions",
 		}, nil
 	default:
