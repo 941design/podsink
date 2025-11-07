@@ -18,6 +18,14 @@ import (
 )
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Podsink - A command-line podcast manager\n\n")
+		fmt.Fprintf(os.Stderr, "Usage: %s [OPTIONS]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Run without options to start the interactive REPL interface.\n\n")
+		fmt.Fprintf(os.Stderr, "Options:\n")
+		flag.PrintDefaults()
+	}
+
 	importOPML := flag.String("import-opml", "", "import subscriptions from an OPML file and exit")
 	exportOPML := flag.String("export-opml", "", "export subscriptions to an OPML file and exit")
 	flag.Parse()
