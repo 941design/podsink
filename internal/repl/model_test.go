@@ -20,6 +20,10 @@ import (
 
 // Helper to create a test app
 func newTestApp(t *testing.T) *app.App {
+	return newTestAppWithConfig(t, nil)
+}
+
+func newTestAppWithConfig(t *testing.T, mutate func(*config.Config)) *app.App {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -27,6 +31,9 @@ func newTestApp(t *testing.T) *app.App {
 	cfg.ParallelDownloads = 0
 	cfg.DownloadRoot = filepath.Join(dir, "downloads")
 	cfg.TmpDir = filepath.Join(dir, "tmp")
+	if mutate != nil {
+		mutate(&cfg)
+	}
 
 	httpClient := &http.Client{Transport: stubTransport{}}
 
@@ -249,5 +256,92 @@ func TestEpisodeListEnterShowsDetails(t *testing.T) {
 	}
 	if m.episodeDetail.ID != res.EpisodeResults[0].Episode.ID {
 		t.Fatalf("expected episode details for %s, got %s", res.EpisodeResults[0].Episode.ID, m.episodeDetail.ID)
+	}
+	if len(m.episodeDetailLines) == 0 {
+		t.Fatal("expected episode description lines to be prepared")
+	}
+}
+
+func TestRenderEpisodeDetailsRespectsMaxLines(t *testing.T) {
+	a := newTestAppWithConfig(t, func(cfg *config.Config) {
+		cfg.MaxEpisodeDescriptionLines = 3
+	})
+
+	m := model{
+		ctx:                 context.Background(),
+		app:                 a,
+		theme:               theme.ForName(a.Config().ColorTheme),
+		episodeDetailsMode:  true,
+		episodeDetail:       app.EpisodeDetail{ID: "ep-1", Title: "Episode One"},
+		episodeDetailLines:  []string{"Line 1", "Line 2", "Line 3", "Line 4"},
+		episodeDetailScroll: 0,
+	}
+
+	view := m.renderEpisodeDetails()
+	if strings.Contains(view, "Line 4") {
+		t.Fatalf("expected line 4 to be hidden initially:\n%s", view)
+	}
+	if !strings.Contains(view, "Line 1") || !strings.Contains(view, "Line 3") {
+		t.Fatalf("expected first page lines to be visible:\n%s", view)
+	}
+	if !strings.Contains(view, "Showing lines 1-3 of 4") {
+		t.Fatalf("expected range indicator on first page:\n%s", view)
+	}
+
+	m.episodeDetailScroll = 1
+	view = m.renderEpisodeDetails()
+	if !strings.Contains(view, "Line 4") {
+		t.Fatalf("expected line 4 to appear after scrolling:\n%s", view)
+	}
+	if strings.Contains(view, "Line 1") {
+		t.Fatalf("expected line 1 to be hidden after scrolling:\n%s", view)
+	}
+	if !strings.Contains(view, "Showing lines 2-4 of 4") {
+		t.Fatalf("expected updated range indicator after scrolling:\n%s", view)
+	}
+}
+
+func TestEpisodeDetailsScrollKeys(t *testing.T) {
+	a := newTestAppWithConfig(t, func(cfg *config.Config) {
+		cfg.MaxEpisodeDescriptionLines = 2
+	})
+
+	m := model{
+		ctx:                context.Background(),
+		app:                a,
+		theme:              theme.ForName(a.Config().ColorTheme),
+		episodeDetailsMode: true,
+		episodeDetail:      app.EpisodeDetail{ID: "ep-1", Title: "Episode"},
+		episodeDetailLines: []string{"L1", "L2", "L3"},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(model)
+	if m.episodeDetailScroll != 1 {
+		t.Fatalf("expected scroll to advance by one, got %d", m.episodeDetailScroll)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	m = updated.(model)
+	if m.episodeDetailScroll != 1 {
+		t.Fatalf("expected scroll to clamp at max offset, got %d", m.episodeDetailScroll)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	m = updated.(model)
+	if m.episodeDetailScroll != 0 {
+		t.Fatalf("expected scroll to move back to 0, got %d", m.episodeDetailScroll)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = updated.(model)
+	if m.episodeDetailScroll != 1 {
+		t.Fatalf("expected pgdown to jump forward, got %d", m.episodeDetailScroll)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = updated.(model)
+	if m.episodeDetailScroll != 0 {
+		t.Fatalf("expected home to reset scroll, got %d", m.episodeDetailScroll)
 	}
 }

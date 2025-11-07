@@ -68,7 +68,7 @@ podsink> episodes
 All Episodes (Newest First) - showing 1-12 of 147:
   → [NEW]  2025-01-15  Building Better Go APIs · Go Time
     [SEEN] 2025-01-08  Concurrency Patterns · Go Time
-# Use ↑↓/jk to scroll through episodes, Enter to view details with formatted descriptions
+# Use ↑↓/jk to scroll through episodes; Enter to view details and ↑↓/jk to scroll long descriptions
 
 podsink> download ep-001
 Downloaded Building Better Go APIs to /path/to/downloads/Go_Time/Building_Better_Go_APIs.mp3
@@ -133,6 +133,7 @@ proxy: ""                               # HTTP proxy URL (optional)
 tls_verify: true                        # Verify TLS certificates
 color_theme: default                    # UI color theme (see available options below)
 max_episodes: 12                        # Maximum episodes to display in list view
+max_episode_description_lines: 12       # Description lines shown before scrolling in details view
 ```
 
 Available themes:

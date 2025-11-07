@@ -18,16 +18,17 @@ import (
 
 // Config represents the persisted application configuration.
 type Config struct {
-	DownloadRoot       string `yaml:"download_root"`
-	ParallelDownloads  int    `yaml:"parallel_downloads"`
-	TmpDir             string `yaml:"tmp_dir"`
-	RetryCount         int    `yaml:"retry_count"`
-	RetryBackoffMaxSec int    `yaml:"retry_backoff_max_seconds"`
-	UserAgent          string `yaml:"user_agent"`
-	Proxy              string `yaml:"proxy,omitempty"`
-	TLSVerify          bool   `yaml:"tls_verify"`
-	ColorTheme         string `yaml:"color_theme"`
-	MaxEpisodes        int    `yaml:"max_episodes"`
+	DownloadRoot               string `yaml:"download_root"`
+	ParallelDownloads          int    `yaml:"parallel_downloads"`
+	TmpDir                     string `yaml:"tmp_dir"`
+	RetryCount                 int    `yaml:"retry_count"`
+	RetryBackoffMaxSec         int    `yaml:"retry_backoff_max_seconds"`
+	UserAgent                  string `yaml:"user_agent"`
+	Proxy                      string `yaml:"proxy,omitempty"`
+	TLSVerify                  bool   `yaml:"tls_verify"`
+	ColorTheme                 string `yaml:"color_theme"`
+	MaxEpisodes                int    `yaml:"max_episodes"`
+	MaxEpisodeDescriptionLines int    `yaml:"max_episode_description_lines"`
 }
 
 // Defaults returns the baseline configuration used on first run.
@@ -35,15 +36,16 @@ func Defaults() Config {
 	home, _ := os.UserHomeDir()
 	downloadRoot := filepath.Join(home, "Podcasts")
 	return Config{
-		DownloadRoot:       downloadRoot,
-		ParallelDownloads:  4,
-		TmpDir:             os.TempDir(),
-		RetryCount:         3,
-		RetryBackoffMaxSec: 60,
-		UserAgent:          "podsink/dev",
-		TLSVerify:          true,
-		ColorTheme:         theme.Default,
-		MaxEpisodes:        12,
+		DownloadRoot:               downloadRoot,
+		ParallelDownloads:          4,
+		TmpDir:                     os.TempDir(),
+		RetryCount:                 3,
+		RetryBackoffMaxSec:         60,
+		UserAgent:                  "podsink/dev",
+		TLSVerify:                  true,
+		ColorTheme:                 theme.Default,
+		MaxEpisodes:                12,
+		MaxEpisodeDescriptionLines: 12,
 	}
 }
 
@@ -83,6 +85,12 @@ func Load(path string) (Config, error) {
 	}
 	if strings.TrimSpace(cfg.ColorTheme) == "" {
 		cfg.ColorTheme = theme.Default
+	}
+	if cfg.MaxEpisodes <= 0 {
+		cfg.MaxEpisodes = Defaults().MaxEpisodes
+	}
+	if cfg.MaxEpisodeDescriptionLines <= 0 {
+		cfg.MaxEpisodeDescriptionLines = Defaults().MaxEpisodeDescriptionLines
 	}
 	return cfg, nil
 }
@@ -163,6 +171,7 @@ func EditableKeys() []string {
 		"tls_verify",
 		"color_theme",
 		"max_episodes",
+		"max_episode_description_lines",
 	}
 }
 
@@ -247,6 +256,14 @@ func EditInteractive(ctx context.Context, cfg Config) (Config, error) {
 			},
 			Validate: validatePositiveInt,
 		},
+		{
+			Name: "max_episode_description_lines",
+			Prompt: &survey.Input{
+				Message: "Maximum description lines in episode view",
+				Default: fmt.Sprintf("%d", cfg.MaxEpisodeDescriptionLines),
+			},
+			Validate: validatePositiveInt,
+		},
 	}
 
 	answers := map[string]interface{}{}
@@ -272,6 +289,7 @@ func EditInteractive(ctx context.Context, cfg Config) (Config, error) {
 		cfg.ColorTheme = themeName
 	}
 	cfg.MaxEpisodes = toInt(answers["max_episodes"])
+	cfg.MaxEpisodeDescriptionLines = toInt(answers["max_episode_description_lines"])
 
 	return cfg, nil
 }

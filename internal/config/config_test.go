@@ -85,3 +85,31 @@ func TestMaxEpisodesConfigSaveLoad(t *testing.T) {
 		t.Fatalf("MaxEpisodes mismatch: got %d want %d", loaded.MaxEpisodes, 20)
 	}
 }
+
+func TestMaxEpisodeDescriptionLinesDefault(t *testing.T) {
+	cfg := Defaults()
+	if cfg.MaxEpisodeDescriptionLines != 12 {
+		t.Fatalf("expected default MaxEpisodeDescriptionLines=12, got %d", cfg.MaxEpisodeDescriptionLines)
+	}
+}
+
+func TestMaxEpisodeDescriptionLinesSaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	original := Defaults()
+	original.MaxEpisodeDescriptionLines = 5
+
+	if err := Save(path, original); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.MaxEpisodeDescriptionLines != 5 {
+		t.Fatalf("MaxEpisodeDescriptionLines mismatch: got %d want %d", loaded.MaxEpisodeDescriptionLines, 5)
+	}
+}

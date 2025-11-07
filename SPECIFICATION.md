@@ -117,6 +117,7 @@ Failures are logged but do not alter persistent state.
 | `tls_verify` | true | TLS strictness |
 | `color_theme` | `default` | UI color palette (`default`, `high_contrast`) |
 | `max_episodes` | 12 | Maximum episodes to display in list view |
+| `max_episode_description_lines` | 12 | Maximum description lines shown before scrolling in episode details |
 
 ### Data Model Highlights
 **Podcast:** `id`, `title`, `feed_url`, `subscribed_at`  
@@ -208,7 +209,7 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
 - `episodes` lists recorded episodes across subscriptions, newest first, with state badges and podcast titles.
 - The view displays a limited number of episodes at once (configurable via `max_episodes`, default: 12) with scrolling support using arrow keys or j/k.
 - When scrolling through a long list, the header shows "showing X-Y of Z" to indicate the current window position.
-- Pressing `Enter` from the list opens a detailed episode view with HTML-formatted descriptions converted to plain text for console display; `Esc`/`x` returns to the list.
+- Pressing `Enter` from the list opens a detailed episode view with HTML-formatted descriptions converted to plain text. The description initially shows up to `max_episode_description_lines` (default: 12) with ↑↓/j/k scroll support for longer content; `Esc`/`x` returns to the list.
 - `queue` transitions episode to `QUEUED`.
 - Successful download → `DOWNLOADED`.
 - Ignore/unignore toggles `IGNORED`/`SEEN`.

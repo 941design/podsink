@@ -40,12 +40,14 @@ type model struct {
 	detailsPodcast app.SearchResult
 
 	// Interactive episode list state
-	episodeMode        bool
-	episodeResults     []app.EpisodeResult
-	episodeCursor      int
-	episodeScroll      int // Scroll offset for windowed view
-	episodeDetailsMode bool
-	episodeDetail      app.EpisodeDetail
+	episodeMode         bool
+	episodeResults      []app.EpisodeResult
+	episodeCursor       int
+	episodeScroll       int // Scroll offset for windowed view
+	episodeDetailsMode  bool
+	episodeDetail       app.EpisodeDetail
+	episodeDetailScroll int
+	episodeDetailLines  []string
 
 	// Session-level cache for long descriptions
 	longDescCache map[string]string // key: podcast ID, value: long description
@@ -108,6 +110,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "esc", "x":
 				m.episodeDetailsMode = false
+				m.episodeDetailScroll = 0
+				m.episodeDetailLines = nil
+				return m, nil
+			case "down", "j":
+				m.adjustEpisodeDetailScroll(1)
+				return m, nil
+			case "up", "k":
+				m.adjustEpisodeDetailScroll(-1)
+				return m, nil
+			case "pgdown", "ctrl+f":
+				m.adjustEpisodeDetailScroll(m.maxEpisodeDescriptionLines())
+				return m, nil
+			case "pgup", "ctrl+b":
+				m.adjustEpisodeDetailScroll(-m.maxEpisodeDescriptionLines())
+				return m, nil
+			case "end":
+				if total := len(m.episodeDetailLines); total > 0 {
+					max := m.maxEpisodeDescriptionLines()
+					if max <= 0 {
+						max = 12
+					}
+					maxOffset := total - max
+					if maxOffset < 0 {
+						maxOffset = 0
+					}
+					m.episodeDetailScroll = maxOffset
+				}
+				return m, nil
+			case "home":
+				m.episodeDetailScroll = 0
 				return m, nil
 			}
 			return m, nil
@@ -193,8 +225,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 						return m, nil
 					}
-					m.episodeDetailsMode = true
-					m.episodeDetail = detail
+					m.enterEpisodeDetails(detail)
 				}
 				return m, nil
 			case "up", "k":
@@ -754,27 +785,120 @@ func (m model) renderEpisodeDetails() string {
 		b.WriteString("\n")
 	}
 
-	desc := strings.TrimSpace(detail.Description)
-	if desc != "" {
-		// Convert HTML to plain text for better console display
-		plainText, err := html2text.FromString(desc, html2text.Options{
-			PrettyTables: true,
-			OmitLinks:    false,
-		})
-		if err == nil {
-			desc = strings.TrimSpace(plainText)
-		}
-
+	if len(m.episodeDetailLines) > 0 {
 		b.WriteString("\n")
 		b.WriteString(headerStyle.Render("Description:"))
 		b.WriteString("\n")
-		b.WriteString(normalStyle.Render(desc))
-		b.WriteString("\n")
+
+		maxLines := m.maxEpisodeDescriptionLines()
+		if maxLines <= 0 {
+			maxLines = 12
+		}
+		totalLines := len(m.episodeDetailLines)
+		start := m.episodeDetailScroll
+		maxOffset := totalLines - maxLines
+		if maxOffset < 0 {
+			maxOffset = 0
+		}
+		if start > maxOffset {
+			start = maxOffset
+		}
+		if start < 0 {
+			start = 0
+		}
+		end := start + maxLines
+		if end > totalLines {
+			end = totalLines
+		}
+
+		for i := start; i < end; i++ {
+			b.WriteString(normalStyle.Render(m.episodeDetailLines[i]))
+			b.WriteString("\n")
+		}
+
+		if totalLines > maxLines {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("Showing lines %d-%d of %d. Use ↑↓/jk to scroll.", start+1, end, totalLines)))
+			b.WriteString("\n")
+		}
 	}
 
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("Press [x]/Esc to return to the episode list"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to scroll. Press [x]/Esc to return to the episode list."))
 	b.WriteString("\n")
 
 	return b.String()
+}
+
+func (m *model) enterEpisodeDetails(detail app.EpisodeDetail) {
+	m.episodeDetailsMode = true
+	m.episodeDetail = detail
+	m.episodeDetailScroll = 0
+	m.episodeDetailLines = formatEpisodeDescription(detail.Description)
+}
+
+func (m model) maxEpisodeDescriptionLines() int {
+	if m.app == nil {
+		return 12
+	}
+	maxLines := m.app.Config().MaxEpisodeDescriptionLines
+	if maxLines <= 0 {
+		maxLines = 12
+	}
+	return maxLines
+}
+
+func (m *model) adjustEpisodeDetailScroll(delta int) {
+	total := len(m.episodeDetailLines)
+	if total == 0 {
+		m.episodeDetailScroll = 0
+		return
+	}
+	maxLines := m.maxEpisodeDescriptionLines()
+	if maxLines <= 0 {
+		maxLines = 12
+	}
+	maxOffset := total - maxLines
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	newScroll := m.episodeDetailScroll + delta
+	if newScroll < 0 {
+		newScroll = 0
+	}
+	if newScroll > maxOffset {
+		newScroll = maxOffset
+	}
+	m.episodeDetailScroll = newScroll
+}
+
+func formatEpisodeDescription(desc string) []string {
+	cleaned := strings.TrimSpace(desc)
+	if cleaned == "" {
+		return nil
+	}
+
+	plainText, err := html2text.FromString(cleaned, html2text.Options{
+		PrettyTables: true,
+		OmitLinks:    false,
+	})
+	if err == nil {
+		cleaned = strings.TrimSpace(plainText)
+	}
+	if cleaned == "" {
+		return nil
+	}
+
+	cleaned = strings.ReplaceAll(cleaned, "\r\n", "\n")
+	cleaned = strings.ReplaceAll(cleaned, "\r", "\n")
+
+	lines := strings.Split(cleaned, "\n")
+	for i := range lines {
+		lines[i] = strings.TrimRight(lines[i], " \t")
+	}
+
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	return lines
 }
