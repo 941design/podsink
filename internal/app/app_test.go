@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,113 @@ func TestHelpListsKeyCommands(t *testing.T) {
 		if !strings.Contains(result.Message, expected) {
 			t.Errorf("help output missing %q\n%s", expected, result.Message)
 		}
+	}
+}
+
+func TestExportOPMLRequiresSubscriptions(t *testing.T) {
+	app := newTestApp(t)
+
+	_, err := app.ExportOPML(context.Background(), filepath.Join(t.TempDir(), "subs.opml"))
+	if !errors.Is(err, ErrNoSubscriptionsToExport) {
+		t.Fatalf("expected ErrNoSubscriptionsToExport, got %v", err)
+	}
+}
+
+func TestExportOPMLWritesFile(t *testing.T) {
+	app := newTestApp(t)
+	ctx := context.Background()
+
+	if _, err := app.db.ExecContext(ctx, `INSERT INTO podcasts (id, title, feed_url, subscribed_at) VALUES (?, ?, ?, ?)`,
+		"pod1", "Example Podcast", "http://example.com/feed", time.Now().UTC()); err != nil {
+		t.Fatalf("insert podcast: %v", err)
+	}
+
+	filePath := filepath.Join(t.TempDir(), "subs.opml")
+	count, err := app.ExportOPML(ctx, filePath)
+	if err != nil {
+		t.Fatalf("ExportOPML error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 exported subscription, got %d", count)
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("read exported file: %v", err)
+	}
+	contents := string(data)
+	if !strings.Contains(contents, "<opml") || !strings.Contains(contents, "http://example.com/feed") {
+		t.Fatalf("unexpected OPML contents: %s", contents)
+	}
+}
+
+func TestImportOPML(t *testing.T) {
+	ctx := context.Background()
+	server := newMockPodcastServer(t)
+
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.ParallelDownloads = 0
+	cfg.DownloadRoot = filepath.Join(dir, "downloads")
+	cfg.TmpDir = filepath.Join(dir, "tmp")
+
+	if err := os.MkdirAll(cfg.DownloadRoot, 0o755); err != nil {
+		t.Fatalf("mkdir downloads: %v", err)
+	}
+	if err := os.MkdirAll(cfg.TmpDir, 0o755); err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+
+	db, err := storage.Open(filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatalf("storage.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+	})
+
+	deps := Dependencies{
+		HTTPClient: server.Client(),
+		ITunes:     itunes.NewClient(server.Client(), server.URL),
+	}
+
+	application := NewWithDependencies(cfg, filepath.Join(dir, "config.yaml"), db, deps)
+	t.Cleanup(func() {
+		application.Close()
+	})
+
+	opmlPath := filepath.Join(dir, "import.opml")
+	contents := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<opml version="1.0">
+  <head><title>Subscriptions</title></head>
+  <body>
+    <outline type="rss" text="Example Podcast" xmlUrl="%s/feed" />
+  </body>
+</opml>`, server.URL)
+	if err := os.WriteFile(opmlPath, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write OPML file: %v", err)
+	}
+
+	result, err := application.ImportOPML(ctx, opmlPath)
+	if err != nil {
+		t.Fatalf("ImportOPML error = %v", err)
+	}
+	if result.Imported != 1 {
+		t.Fatalf("expected 1 imported subscription, got %d", result.Imported)
+	}
+	if result.Skipped != 0 {
+		t.Fatalf("expected 0 skipped subscriptions, got %d", result.Skipped)
+	}
+	if len(result.Errors) != 0 {
+		t.Fatalf("expected no errors, got %v", result.Errors)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM podcasts").Scan(&count); err != nil {
+		t.Fatalf("query podcasts: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 podcast in database, got %d", count)
 	}
 }
 

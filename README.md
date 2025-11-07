@@ -83,10 +83,11 @@ Available commands:
   queue <episode_id>          Queue an episode for download
   download <episode_id>       Download an episode immediately
   ignore <episode_id>         Toggle the ignored state for an episode
-  export <file_path>          Export subscriptions to OPML file
-  import <file_path>          Import subscriptions from OPML file
   exit                        Exit the application
 ```
+
+To import or export subscriptions without entering the REPL, run Podsink with
+`--import-opml <file>` or `--export-opml <file>`.
 
 ## Commands Reference
 
@@ -104,8 +105,8 @@ Available commands:
 
 ### Import/Export
 
-- `export <file_path>` - Export subscriptions to OPML format
-- `import <file_path>` - Import subscriptions from OPML file
+- `--export-opml <file_path>` - Export subscriptions to OPML format without starting the REPL
+- `--import-opml <file_path>` - Import subscriptions from OPML file without starting the REPL
 
 ### Configuration
 
@@ -175,14 +176,14 @@ Downloaded files are SHA256-hashed and stored in the database. Re-downloading an
 Export your subscriptions to share across devices or podcast apps:
 
 ```bash
-podsink> export ~/my-podcasts.opml
+podsink --export-opml ~/my-podcasts.opml
 Exported 25 subscriptions to /Users/you/my-podcasts.opml
 ```
 
 Import from other podcast apps:
 
 ```bash
-podsink> import ~/podcasts-backup.opml
+podsink --import-opml ~/podcasts-backup.opml
 Imported 18 subscriptions, skipped 7 already subscribed.
 ```
 
