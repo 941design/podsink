@@ -30,7 +30,7 @@ Production-ready v1.0.
 1. **Search** podcasts using the Apple iTunes Search API.
 2. **Subscribe / Unsubscribe** to podcasts (persisted in SQLite).
 3. **List Subscriptions** (`list subscriptions`) with counts of new/unplayed episodes.
-4. **View Episodes** (`episodes [podcast]`) with scrollable/autocomplete UI.
+4. **View Episodes** (`episodes`) with scrollable/autocomplete UI.
 5. **Queue / Download** episodes on-demand with resumable transfers.
 6. **Ignore / Unignore** episodes manually.
 7. **Manage Config** interactively (`config` command).
@@ -43,7 +43,7 @@ Production-ready v1.0.
 - Commands:
   - `search [query]`
   - `list subscriptions`
-  - `episodes [podcast]`
+  - `episodes` (aliases: `e`, `le`)
   - `queue [episode_id]`
   - `download [episode_id]`
   - `ignore [episode_id]`
@@ -203,7 +203,8 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
 - Subscribing/unsubscribing from either the search results or subscriptions list updates the database immediately and reflects in the UI without requiring podcast IDs.
 
 ### Episodes
-- `episodes [podcast]` lists correct items with states.
+- `episodes` lists all recorded episodes across subscriptions, newest first, with state badges and podcast titles.
+- Pressing `Enter` from the list opens a detailed episode view; `Esc`/`x` returns to the list.
 - `queue` transitions episode to `QUEUED`.
 - Successful download → `DOWNLOADED`.
 - Ignore/unignore toggles `IGNORED`/`SEEN`.

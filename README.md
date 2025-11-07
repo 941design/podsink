@@ -64,11 +64,10 @@ podsink> list subscriptions
 # Shows all subscribed podcasts in the interactive list. Use "u" to unsubscribe
 # from the highlighted podcast or Enter to view details.
 
-podsink> episodes 12345
-Episodes for Go Time (12345):
-  ID         STATE  PUBLISHED   TITLE
-  ep-001     NEW    2025-01-15  Building Better Go APIs
-  ep-002     NEW    2025-01-08  Concurrency Patterns
+podsink> episodes
+All Episodes (Newest First):
+  [NEW]  2025-01-15  Building Better Go APIs · Go Time
+  [SEEN] 2025-01-08  Concurrency Patterns · Go Time
 
 podsink> download ep-001
 Downloaded Building Better Go APIs to /path/to/downloads/Go_Time/Building_Better_Go_APIs.mp3
@@ -79,7 +78,7 @@ Available commands:
   config [show]               View or edit application configuration
   search <query>              Search for podcasts via the iTunes API
   list subscriptions          List all podcast subscriptions
-  episodes <podcast_id>       View episodes for a podcast
+  episodes                    View recent episodes across subscriptions (aliases: e, le)
   queue <episode_id>          Queue an episode for download
   download <episode_id>       Download an episode immediately
   ignore <episode_id>         Toggle the ignored state for an episode
@@ -98,7 +97,7 @@ To import or export subscriptions without entering the REPL, run Podsink with
 
 ### Episode Management
 
-- `episodes <podcast_id>` - List all episodes for a subscribed podcast
+- `episodes` - Browse all recorded episodes (newest first) across your subscriptions
 - `queue <episode_id>` - Add episode to download queue (background download)
 - `download <episode_id>` - Download episode immediately (foreground)
 - `ignore <episode_id>` - Toggle ignore state (hidden from listings)

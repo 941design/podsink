@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
 	"podsink/internal/app"
 	"podsink/internal/config"
 	"podsink/internal/itunes"
@@ -211,5 +212,42 @@ func TestUnsubscribeUpdatesStatusInListView(t *testing.T) {
 	// Assert: Subscription status should be updated
 	if m.searchResults[0].IsSubscribed {
 		t.Error("Expected IsSubscribed to be false after unsubscribing from list view")
+	}
+}
+
+func TestEpisodeListEnterShowsDetails(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "stub", Title: "Stub Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	res, err := a.Execute(ctx, "episodes")
+	if err != nil {
+		t.Fatalf("Execute(episodes) error = %v", err)
+	}
+	if len(res.EpisodeResults) == 0 {
+		t.Fatal("expected at least one episode result")
+	}
+
+	m := model{
+		ctx:            ctx,
+		app:            a,
+		input:          textinput.New(),
+		episodeMode:    true,
+		episodeResults: res.EpisodeResults,
+		episodeCursor:  0,
+		theme:          theme.ForName(a.Config().ColorTheme),
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if !m.episodeDetailsMode {
+		t.Fatal("expected to enter episode details mode after pressing enter")
+	}
+	if m.episodeDetail.ID != res.EpisodeResults[0].Episode.ID {
+		t.Fatalf("expected episode details for %s, got %s", res.EpisodeResults[0].Episode.ID, m.episodeDetail.ID)
 	}
 }
