@@ -100,6 +100,10 @@ Failures are logged but do not alter persistent state.
 - **Logs:** `~/.podsink/podsink.log`
 - **OPML import/export:** `~/.podsink/subscriptions.opml`
 
+### Command-line Options
+- `--import-opml <path>` imports subscriptions from an OPML file and exits before starting the REPL.
+- `--export-opml <path>` exports current subscriptions to an OPML file and exits before starting the REPL.
+
 ### Config Keys
 | Key | Default | Description |
 |------|----------|-------------|
@@ -202,6 +206,11 @@ After running `search <query>` or `list subscriptions`, an interactive list of p
 - `queue` transitions episode to `QUEUED`.
 - Successful download → `DOWNLOADED`.
 - Ignore/unignore toggles `IGNORED`/`SEEN`.
+
+### OPML Import/Export
+- `podsink --export-opml <path>` writes subscriptions to the specified file and exits before launching the REPL.
+- `podsink --import-opml <path>` imports subscriptions, reporting counts of imported, skipped, and failed entries, then exits before launching the REPL.
+- Passing both flags together returns an error and a non-zero exit code without performing any action.
 
 ### Downloads
 - No leftover partials in final dir on error.
