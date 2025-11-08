@@ -41,8 +41,7 @@ Production-ready v1.0.
 ### Menu Interface
 The application uses a navigable main menu as the primary interface:
 - **Main Menu Options:**
-  - **Search** `[s]` - Search for podcasts and subscribe/unsubscribe
-  - **Podcasts** `[p]` - List all subscriptions (alias for `list subscriptions`)
+  - **Podcasts** `[p]` - List all subscriptions (alias for `list subscriptions`). While browsing subscriptions, press `[s]` to open podcast search without returning to the main menu.
   - **Episodes** `[e]` - View and manage recent episodes
   - **Queue** `[q]` - View download queue status (displays count of queued episodes when non-zero)
   - **Downloads** `[d]` - View all downloaded episodes (displays count of downloaded episodes when non-zero)
@@ -52,14 +51,16 @@ The application uses a navigable main menu as the primary interface:
 - **Navigation:**
   - Use ↑↓ or j/k to navigate menu items
   - Press Enter to select the highlighted option
-  - Use keyboard shortcuts (s/p/e/q/d/c/x) to jump directly to an option
+  - Use keyboard shortcuts (p/e/q/d/c/x) to jump directly to an option
   - Press ESC or x from any submenu to return to main menu
   - Counts for Queue and Downloads are automatically updated when returning to the main menu
 
 - **Search Mode:**
-  - When search is selected, a text input prompt appears: `search>`
-  - Type query and press Enter to execute search
-  - Press ESC to cancel and return to main menu
+  - Triggered from the subscriptions view (`[s]`) or by typing `search <query>` in the REPL.
+  - Displays a text input prompt: `search>`
+  - Type a query and press Enter to execute a podcast search
+  - Press ESC to cancel and return to the previous view
+  - Episodes view also supports `[s]` to open an episode search prompt (`episodes search>`), filtering results by title or podcast
 
 ### Episode State Machine
 | State | Description | Transitions |
@@ -148,20 +149,20 @@ Failures are logged but do not alter persistent state.
 
 ### Menu Navigation Flow
 - The application starts with the main menu displaying all available options.
-- Users navigate using ↑↓/jk keys or keyboard shortcuts (s/p/e/q/c/x).
+- Users navigate using ↑↓/jk keys or keyboard shortcuts (p/e/q/c/x).
 - Pressing Enter or a shortcut key activates the selected option.
 - All submenus (search results, episodes, queue, etc.) can be exited with ESC or x to return to the main menu.
 - No traditional command prompt - all interactions are menu-driven with dedicated input modes for search queries.
 
 ### Search & Subscribe Flow
-The `search` command (or `[s]` shortcut from the main menu) enters **search input mode**, where the prompt changes to `search>`. The user types their search query and presses Enter to execute the search. Press `Esc` to exit search mode without searching.
+The `search` command (or `[s]` shortcut from the subscriptions view) enters **search input mode**, where the prompt changes to `search>`. The user types their search query and presses Enter to execute the search. Press `Esc` to exit search mode without searching. When viewing episodes, pressing `[s]` opens an `episodes search>` prompt that filters the episode list by title or podcast.
 
 After executing a search or running `list subscriptions`, an interactive list of podcasts is displayed:
 
 **List View:**
 - Navigate with ↑↓ or j/k keys
 - Press `Enter` to view podcast details
-- Press `s` to subscribe directly (stays in list view)
+- Press `s` to subscribe directly when viewing search results (stays in list view); in the subscriptions list, `s` opens the podcast search prompt
 - Press `u` to unsubscribe directly (stays in list view)
 - Press `x`, `Esc`, or `q` to exit search mode
 - Subscribed podcasts are shown in green with a `[subscribed]` suffix
@@ -208,7 +209,8 @@ After executing a search or running `list subscriptions`, an interactive list of
 - Auto-corrects episodes stuck in QUEUED state if their files already exist on disk, updating them to DOWNLOADED.
 
 ### Search
-- `search` command (or `[s]` shortcut) enters search input mode with `search>` prompt.
+- `search` command (or `[s]` shortcut from the subscriptions view) enters search input mode with `search>` prompt.
+- `[s]` within the episodes view opens an `episodes search>` prompt that filters the episode list.
 - User types query and presses Enter to execute search (completes within 5s using iTunes API).
 - Press `Esc` to exit search input mode without searching.
 - If query is empty, an error message is displayed.

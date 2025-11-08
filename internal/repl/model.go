@@ -82,6 +82,8 @@ type model struct {
 	width    int
 
 	searchInputMode bool // When true, input is shown for entering search query
+	searchTarget    string
+	searchReturn    string
 	commandMenu     commandMenuView
 	search          searchView
 	episodes        episodeView
@@ -106,7 +108,6 @@ func newModel(ctx context.Context, application *app.App) model {
 
 	// Build command menu items
 	commandItems := []commandMenuItem{
-		{name: "search", usage: "search", description: "Search for podcasts via the iTunes API", shorthand: "[s]"},
 		{name: "list", usage: "podcasts", description: "List all podcast subscriptions", shorthand: "[p]"},
 		{name: "episodes", usage: "episodes", description: "View recent episodes across subscriptions", shorthand: "[e]"},
 		{name: "queue", usage: "queue", description: "View download queue status", shorthand: "[q]"},
@@ -180,14 +181,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 					// For commands that need arguments, prompt for input
 					switch selectedItem.name {
-					case "search":
-						// Enter search input mode
-						m.searchInputMode = true
-						m.input.Prompt = "search> "
-						m.input.Placeholder = "Enter podcast search query..."
-						m.input.SetValue("")
-						m.input.SetCursor(0)
-						return m, nil
 					case "list":
 						// Execute "list subscriptions" directly
 						result, err := m.app.Execute(m.ctx, "list subscriptions")
@@ -206,16 +199,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m.handleCommandResult(result)
 					}
 				}
-				return m, nil
-			case "s":
-				// Shortcut for search - enter search input mode
-				m.commandMenu.active = false
-				m.searchInputMode = true
-				m.input.Focus()
-				m.input.Prompt = "search> "
-				m.input.Placeholder = "Enter podcast search query..."
-				m.input.SetValue("")
-				m.input.SetCursor(0)
 				return m, nil
 			case "p":
 				// Shortcut for list podcasts
@@ -393,6 +376,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "s":
+				if m.search.context == "subscriptions" {
+					m.beginSearchInput("podcasts", "search> ", "Enter podcast search query...", "subscriptions")
+					return m, nil
+				}
 				// Subscribe directly from list view
 				return m.handleSearchSubscribe()
 			case "u":
@@ -524,6 +511,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m.handleCommandResult(result)
 				}
 				return m, nil
+			case "s":
+				// Enter episode search mode
+				m.beginSearchInput("episodes", "episodes search> ", "Enter episode search query...", "episodes")
+				return m, nil
 			}
 		}
 
@@ -612,30 +603,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case tea.KeyEsc:
 				// Exit search input mode - return to main menu
+				returnState := m.searchReturn
 				m.searchInputMode = false
+				m.searchTarget = ""
+				m.searchReturn = ""
 				m.input.SetValue("")
-				m.refreshCounts()
-				m.commandMenu.active = true
-				m.input.Blur()
+				m.restoreAfterSearchInput(returnState)
 				return m, nil
 			case tea.KeyEnter:
 				// Execute search with the query
 				query := strings.TrimSpace(m.input.Value())
+				target := m.searchTarget
+				returnState := m.searchReturn
 				m.searchInputMode = false
+				m.searchTarget = ""
+				m.searchReturn = ""
 				m.input.SetValue("")
 
 				if query == "" {
-					// Empty query returns to main menu
-					m.commandMenu.active = true
-					m.input.Blur()
+					m.restoreAfterSearchInput(returnState)
 					return m, nil
 				}
 
-				result, err := m.app.Execute(m.ctx, "search "+query)
+				command := "search " + query
+				if target == "episodes" {
+					command = "search episodes " + query
+				}
+
+				result, err := m.app.Execute(m.ctx, command)
 				if err != nil {
-					// On error, return to command menu
-					m.commandMenu.active = true
-					m.input.Blur()
+					m.restoreAfterSearchInput(returnState)
 					return m, nil
 				}
 				return m.handleCommandResult(result)
@@ -651,6 +648,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) beginSearchInput(target, prompt, placeholder, returnState string) {
+	m.searchInputMode = true
+	m.searchTarget = target
+	m.searchReturn = returnState
+	m.commandMenu.active = false
+	m.input.Focus()
+	m.input.Prompt = prompt
+	m.input.Placeholder = placeholder
+	m.input.SetValue("")
+	m.input.SetCursor(0)
+}
+
+func (m *model) restoreAfterSearchInput(returnState string) {
+	switch returnState {
+	case "subscriptions":
+		m.commandMenu.active = false
+		if !m.search.active && len(m.search.results) > 0 {
+			m.search.active = true
+		}
+	case "episodes":
+		m.commandMenu.active = false
+		if !m.episodes.active && len(m.episodes.results) > 0 {
+			m.episodes.active = true
+		}
+	default:
+		m.refreshCounts()
+		m.commandMenu.active = true
+	}
+	m.input.Blur()
+}
+
 func (m model) View() string {
 	// If in command menu mode, render the menu
 	if m.commandMenu.active {
@@ -660,9 +688,19 @@ func (m model) View() string {
 	// If in search input mode, render the search input
 	if m.searchInputMode {
 		var b strings.Builder
-		b.WriteString(m.theme.Header.Render("Search for Podcasts"))
+		title := "Search for Podcasts"
+		hint := "Enter search query (Esc to cancel):"
+		switch m.searchTarget {
+		case "episodes":
+			title = "Search Episodes"
+			hint = "Enter keywords to find episodes (Esc to cancel):"
+		case "podcasts":
+			title = "Search for Podcasts"
+			hint = "Enter search query (Esc to cancel):"
+		}
+		b.WriteString(m.theme.Header.Render(title))
 		b.WriteString("\n")
-		b.WriteString(m.theme.Dim.Render("Enter search query (Esc to cancel):"))
+		b.WriteString(m.theme.Dim.Render(hint))
 		b.WriteString("\n\n")
 		b.WriteString(m.input.View())
 		b.WriteString("\n")
@@ -1111,7 +1149,7 @@ func (m model) renderEpisodeList() string {
 		b.WriteString(headerStyle.Render("No episodes to display"))
 		b.WriteString("\n")
 	}
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [x]/Esc to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [s] search, [x]/Esc to exit"))
 	b.WriteString("\n\n")
 
 	// Column abbreviation settings
@@ -1656,7 +1694,7 @@ func (m model) renderCommandMenu() string {
 
 	b.WriteString(headerStyle.Render("Podsink - Podcast Manager"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ueue [d]ownloads [c]onfig, ESC/[x] to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [p]odcasts [e]pisodes [q]ueue [d]ownloads [c]onfig, ESC/[x] to exit"))
 	b.WriteString("\n\n")
 
 	for i, item := range m.commandMenu.items {
@@ -1668,7 +1706,7 @@ func (m model) renderCommandMenu() string {
 			style = cursorStyle
 		}
 
-		// Format: → [s] search <query> - Search for podcasts
+		// Format: → [p] podcasts - List all podcast subscriptions
 		shorthand := item.shorthand
 		if shorthand == "" {
 			shorthand = "   "

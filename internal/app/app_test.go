@@ -161,6 +161,91 @@ func TestListCommandUsage(t *testing.T) {
 	}
 }
 
+func TestSearchEpisodesCommand(t *testing.T) {
+	ctx := context.Background()
+	server := newMockPodcastServer(t)
+
+	dir := t.TempDir()
+	cfg := config.Defaults()
+	cfg.ParallelDownloads = 0
+	cfg.DownloadRoot = filepath.Join(dir, "downloads")
+	cfg.TmpDir = filepath.Join(dir, "tmp")
+
+	if err := os.MkdirAll(cfg.DownloadRoot, 0o755); err != nil {
+		t.Fatalf("mkdir downloads: %v", err)
+	}
+	if err := os.MkdirAll(cfg.TmpDir, 0o755); err != nil {
+		t.Fatalf("mkdir tmp: %v", err)
+	}
+
+	db, err := storage.Open(filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatalf("storage.Open() error = %v", err)
+	}
+	t.Cleanup(func() {
+		db.Close()
+	})
+
+	deps := Dependencies{
+		HTTPClient: server.Client(),
+		ITunes:     itunes.NewClient(server.Client(), server.URL),
+	}
+
+	application := NewWithDependencies(cfg, filepath.Join(dir, "config.yaml"), db, deps)
+	t.Cleanup(func() {
+		application.Close()
+	})
+
+	exec := func(command string) CommandResult {
+		result, err := application.Execute(ctx, command)
+		if err != nil {
+			t.Fatalf("Execute(%s) error = %v", command, err)
+		}
+		return result
+	}
+
+	searchResult := exec("search Example")
+	if len(searchResult.SearchResults) == 0 {
+		t.Fatal("expected podcast search results")
+	}
+
+	var podcast itunes.Podcast
+	for _, sr := range searchResult.SearchResults {
+		if sr.Podcast.Title == "Example Podcast" {
+			podcast = sr.Podcast
+			break
+		}
+	}
+	if podcast.ID == "" {
+		t.Fatal("failed to locate podcast in search results")
+	}
+
+	if _, err := application.SubscribePodcast(ctx, podcast); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	episodesResult := exec("search episodes Episode")
+	if len(episodesResult.EpisodeResults) != 2 {
+		t.Fatalf("expected 2 episode search results, got %d", len(episodesResult.EpisodeResults))
+	}
+
+	filtered := exec("search episodes Two")
+	if len(filtered.EpisodeResults) != 1 {
+		t.Fatalf("expected 1 filtered episode, got %d", len(filtered.EpisodeResults))
+	}
+	if filtered.EpisodeResults[0].Episode.Title != "Episode Two" {
+		t.Fatalf("expected Episode Two, got %s", filtered.EpisodeResults[0].Episode.Title)
+	}
+
+	none := exec("search episodes Missing")
+	if none.EpisodeResults != nil && len(none.EpisodeResults) > 0 {
+		t.Fatalf("expected no episode results, got %d", len(none.EpisodeResults))
+	}
+	if !strings.Contains(none.Message, "No episodes found.") {
+		t.Fatalf("expected no episodes message, got %q", none.Message)
+	}
+}
+
 func TestConfigShowRendersYaml(t *testing.T) {
 	app := newTestApp(t)
 

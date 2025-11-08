@@ -201,6 +201,52 @@ ORDER BY
 	return results, nil
 }
 
+func (s *Store) SearchEpisodes(ctx context.Context, query string) ([]domain.EpisodeResult, error) {
+	like := "%" + strings.ToLower(query) + "%"
+
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.title, e.state, e.published_at, e.size_bytes, p.id, p.title
+FROM episodes e
+JOIN podcasts p ON p.id = e.podcast_id
+WHERE LOWER(e.title) LIKE ? OR LOWER(p.title) LIKE ?
+ORDER BY
+    CASE WHEN e.published_at IS NULL OR e.published_at = '' THEN 1 ELSE 0 END,
+    e.published_at DESC,
+    LOWER(p.title),
+    LOWER(e.title)`, like, like)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]domain.EpisodeResult, 0, 32)
+	for rows.Next() {
+		var episode domain.EpisodeRow
+		var published sql.NullString
+		var podcastID, podcastTitle string
+		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &episode.SizeBytes, &podcastID, &podcastTitle); err != nil {
+			return nil, err
+		}
+		if published.Valid {
+			if parsed, err := time.Parse(time.RFC3339Nano, published.String); err == nil {
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
+			} else if parsed, err := time.Parse(time.RFC3339, published.String); err == nil {
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
+			}
+		}
+		results = append(results, domain.EpisodeResult{
+			Episode:      episode,
+			PodcastID:    podcastID,
+			PodcastTitle: podcastTitle,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 func (s *Store) ListQueuedEpisodes(ctx context.Context) ([]domain.QueuedEpisodeResult, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.title, e.state, e.published_at, e.size_bytes, e.retry_count, p.id, p.title, d.enqueued_at
 FROM episodes e

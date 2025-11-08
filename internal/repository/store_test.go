@@ -277,6 +277,80 @@ func TestStoreQueueAndDownloadLifecycle(t *testing.T) {
 	}
 }
 
+func TestStoreSearchEpisodes(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+
+	now := time.Now().UTC()
+	sub1 := domain.SubscriptionData{
+		Podcast: domain.Podcast{
+			ID:        "pod-search-1",
+			Title:     "Go Time",
+			FeedURL:   "http://example.com/go.xml",
+			CreatedAt: now,
+		},
+		Episodes: []domain.EpisodeInput{
+			{
+				ID:          "go-1",
+				Title:       "Concurrency Patterns",
+				Description: "Discussing Go concurrency",
+				Enclosure:   "http://example.com/go1.mp3",
+			},
+			{
+				ID:          "go-2",
+				Title:       "Testing Strategies",
+				Description: "Deep dive into testing",
+				Enclosure:   "http://example.com/go2.mp3",
+			},
+		},
+	}
+	if _, err := store.SaveSubscription(ctx, sub1); err != nil {
+		t.Fatalf("SaveSubscription go: %v", err)
+	}
+
+	sub2 := domain.SubscriptionData{
+		Podcast: domain.Podcast{
+			ID:        "pod-search-2",
+			Title:     "Rustacean Station",
+			FeedURL:   "http://example.com/rust.xml",
+			CreatedAt: now,
+		},
+		Episodes: []domain.EpisodeInput{
+			{
+				ID:          "rust-1",
+				Title:       "Ownership Basics",
+				Description: "Explaining ownership",
+				Enclosure:   "http://example.com/rust1.mp3",
+			},
+		},
+	}
+	if _, err := store.SaveSubscription(ctx, sub2); err != nil {
+		t.Fatalf("SaveSubscription rust: %v", err)
+	}
+
+	results, err := store.SearchEpisodes(ctx, "concurrency")
+	if err != nil {
+		t.Fatalf("SearchEpisodes concurrency: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Episode.ID != "go-1" {
+		t.Errorf("expected go-1, got %s", results[0].Episode.ID)
+	}
+
+	byPodcast, err := store.SearchEpisodes(ctx, "rustacean")
+	if err != nil {
+		t.Fatalf("SearchEpisodes rustacean: %v", err)
+	}
+	if len(byPodcast) != 1 {
+		t.Fatalf("expected 1 result for podcast match, got %d", len(byPodcast))
+	}
+	if byPodcast[0].Episode.ID != "rust-1" {
+		t.Errorf("expected rust-1, got %s", byPodcast[0].Episode.ID)
+	}
+}
+
 func TestListQueuedEpisodesIncludesDownloadedEpisodes(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTestStore(t)

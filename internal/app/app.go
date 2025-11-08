@@ -215,7 +215,7 @@ func (a *App) LookupPodcast(ctx context.Context, id string) (itunes.Podcast, err
 func (a *App) registerCommands() {
 	a.registerCommand("config", "config [show]", "View or edit application configuration", a.configCommand)
 	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
-	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
+	a.registerCommand("search", "search <query> | search episodes <query>", "Search for podcasts (default) or episodes", a.searchCommand, "s")
 	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
 	a.registerCommand("episodes", "episodes", "View recent episodes across subscriptions", a.episodesCommand, "e", "le")
 	a.registerCommand("queue", "queue [episode_id]", "View download queue status or queue an episode", a.queueCommand, "q")
@@ -270,7 +270,22 @@ func (a *App) exitCommand(_ context.Context, _ []string) (CommandResult, error) 
 
 func (a *App) searchCommand(ctx context.Context, args []string) (CommandResult, error) {
 	if len(args) == 0 {
-		return CommandResult{Message: "Usage: search <query>"}, nil
+		return CommandResult{Message: "Usage: search <query> | search episodes <query>"}, nil
+	}
+
+	if topic := strings.ToLower(args[0]); topic == "episodes" || topic == "episode" {
+		if len(args) == 1 {
+			return CommandResult{Message: "Usage: search episodes <query>"}, nil
+		}
+		term := strings.Join(args[1:], " ")
+		results, err := a.episodes.Search(ctx, term)
+		if err != nil {
+			return CommandResult{}, err
+		}
+		if len(results) == 0 {
+			return CommandResult{Message: "No episodes found."}, nil
+		}
+		return CommandResult{EpisodeResults: results}, nil
 	}
 
 	term := strings.Join(args, " ")
@@ -417,7 +432,7 @@ func (a *App) listCommand(ctx context.Context, args []string) (CommandResult, er
 		return CommandResult{
 			SearchResults: results,
 			SearchTitle:   "Subscriptions",
-			SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [u] unsubscribe, [x]/Esc to exit",
+			SearchHint:    "Use ↑↓/jk to navigate, Enter for details, [s] search podcasts, [u] unsubscribe, [x]/Esc to exit",
 			SearchContext: "subscriptions",
 		}, nil
 	default:

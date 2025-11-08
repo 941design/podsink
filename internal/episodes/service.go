@@ -2,6 +2,7 @@ package episodes
 
 import (
 	"context"
+	"strings"
 
 	"podsink/internal/domain"
 	"podsink/internal/repository"
@@ -25,6 +26,14 @@ func (s *Service) ListQueued(ctx context.Context) ([]domain.QueuedEpisodeResult,
 
 func (s *Service) ListDownloaded(ctx context.Context) ([]domain.EpisodeResult, error) {
 	return s.store.ListDownloadedEpisodes(ctx)
+}
+
+func (s *Service) Search(ctx context.Context, query string) ([]domain.EpisodeResult, error) {
+	trimmed := strings.TrimSpace(query)
+	if trimmed == "" {
+		return []domain.EpisodeResult{}, nil
+	}
+	return s.store.SearchEpisodes(ctx, trimmed)
 }
 
 func (s *Service) MarkAllSeen(ctx context.Context) error {

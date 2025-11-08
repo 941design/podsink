@@ -58,10 +58,9 @@ The application starts with a navigable main menu:
 
 ```
 Podsink - Podcast Manager
-Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ueue [d]ownloads [c]onfig, ESC/[x] to exit
+Use ↑↓/jk to navigate, Enter to select, [p]odcasts [e]pisodes [q]ueue [d]ownloads [c]onfig, ESC/[x] to exit
 
-  → [s] search
-    [p] podcasts
+  → [p] podcasts
     [e] episodes
     [q] queue
     [d] downloads
@@ -71,21 +70,12 @@ Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ue
 
 **Navigation:**
 - Use ↑↓ or j/k to move through menu items
-- Press Enter or use keyboard shortcuts (s/p/e/q/d/c/x) to select an option
+- Press Enter or use keyboard shortcuts (p/e/q/d/c/x) to select an option
 - Press ESC or x to exit from any submenu back to the main menu
 
-**Search:** Press `s` or select "search" to enter a search query. Type your query and press Enter to see results.
-```
-Search for Podcasts
-Enter search query (Esc to cancel):
+**List Subscriptions:** Press `p` or select "podcasts" to view all subscribed podcasts. While in this view, press `s` to open podcast search without returning to the main menu.
 
-search> golang
-```
-Results appear in an interactive list. Use ↑↓/jk to navigate, Enter for details, `s` to subscribe, or `u` to unsubscribe.
-
-**List Subscriptions:** Press `p` or select "podcasts" to view all subscribed podcasts.
-
-**View Episodes:** Press `e` or select "episodes" to browse recent episodes:
+**View Episodes:** Press `e` or select "episodes" to browse recent episodes. Press `s` at any time to search episodes by title or podcast:
 ```
 Episodes (hiding ignored) (Newest First) - showing 1-12 of 147:
 Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [x]/Esc to exit
@@ -111,17 +101,12 @@ flags `--import-opml <file>` or `--export-opml <file>`.
 
 ### Main Menu Options
 
-- **Search** `[s]` - Search for podcasts using the iTunes Search API
-  - Enter a search query to find podcasts
-  - Navigate results with ↑↓/jk
-  - Press `s` to subscribe, `u` to unsubscribe
-  - Press `x` or ESC to return to main menu
-
 - **Podcasts** `[p]` - Browse all subscriptions
   - View all subscribed podcasts with episode counts
   - Navigate with ↑↓/jk
   - Press Enter for podcast details
   - Press `u` to unsubscribe
+  - Press `s` to search for new podcasts from within the subscriptions list
   - Press `x` or ESC to return to main menu
 
 - **Episodes** `[e]` - Browse all recorded episodes (newest first)
@@ -132,6 +117,7 @@ flags `--import-opml <file>` or `--export-opml <file>`.
   - Press `[I]` to show only ignored episodes
   - Press `[D]` to show only downloaded episodes
   - Press `d` to queue episode for download
+  - Press `s` to search episodes by title or podcast
   - Press `x` or ESC to return to main menu
   - Episodes displayed as: DATE | PODCAST_NAME | EPISODE_TITLE | SIZE (MB)
 

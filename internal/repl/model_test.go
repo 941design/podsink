@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"podsink/internal/app"
 	"podsink/internal/config"
+	"podsink/internal/domain"
 	"podsink/internal/itunes"
 	"podsink/internal/storage"
 	"podsink/internal/theme"
@@ -225,6 +226,74 @@ func TestUnsubscribeUpdatesStatusInListView(t *testing.T) {
 	// Assert: Subscription status should be updated
 	if m.search.results[0].IsSubscribed {
 		t.Error("Expected IsSubscribed to be false after unsubscribing from list view")
+	}
+}
+
+func TestSubscriptionsSearchShortcutActivatesInput(t *testing.T) {
+	a := newTestApp(t)
+
+	m := model{
+		ctx:   context.Background(),
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active:  true,
+			context: "subscriptions",
+			results: []app.SearchResult{{Podcast: itunes.Podcast{ID: "1", Title: "Subscribed"}, IsSubscribed: true}},
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	updated, _ := m.Update(msg)
+	m = updated.(model)
+
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode to activate")
+	}
+	if m.searchTarget != "podcasts" {
+		t.Fatalf("expected search target podcasts, got %s", m.searchTarget)
+	}
+	if m.searchReturn != "subscriptions" {
+		t.Fatalf("expected search return subscriptions, got %s", m.searchReturn)
+	}
+}
+
+func TestEpisodesSearchShortcutActivatesInput(t *testing.T) {
+	a := newTestApp(t)
+
+	m := model{
+		ctx:   context.Background(),
+		app:   a,
+		input: textinput.New(),
+		episodes: episodeView{
+			active: true,
+			results: []app.EpisodeResult{
+				{
+					Episode: domain.EpisodeRow{ID: "ep-1", Title: "Episode One"},
+				},
+			},
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	updated, _ := m.Update(msg)
+	m = updated.(model)
+
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode to activate for episodes")
+	}
+	if m.searchTarget != "episodes" {
+		t.Fatalf("expected search target episodes, got %s", m.searchTarget)
+	}
+	if m.searchReturn != "episodes" {
+		t.Fatalf("expected search return episodes, got %s", m.searchReturn)
+	}
+	if m.input.Prompt != "episodes search> " {
+		t.Fatalf("expected episodes prompt, got %q", m.input.Prompt)
 	}
 }
 
