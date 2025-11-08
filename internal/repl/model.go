@@ -351,7 +351,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Handle search mode navigation
-		if m.search.active {
+		if m.search.active && !m.searchInputMode {
 			switch msg.String() {
 			case "ctrl+c":
 				m.quitting = true
@@ -411,7 +411,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Handle episode mode navigation
-		if m.episodes.active {
+		if m.episodes.active && !m.searchInputMode {
 			switch msg.String() {
 			case "ctrl+c":
 				m.quitting = true
@@ -635,10 +635,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchInputMode = false
 				m.searchTarget = ""
 				m.searchReturn = ""
-				if returnState == "subscriptions" {
-					m.searchParent = ""
-					m.clearSubscriptionBackup()
-				}
+				// Don't clear searchParent or backup for subscriptions - they're needed for 'x' to restore
 				if returnState == "episodes" {
 					if m.episodes.showingSearch {
 						m.restoreEpisodeList()
@@ -731,7 +728,8 @@ func (m *model) beginSearchInput(target, prompt, placeholder, returnState string
 	switch returnState {
 	case "subscriptions":
 		m.searchParent = "subscriptions"
-		if len(m.search.results) > 0 {
+		// Only backup if we don't already have a backup (prevents overwriting original subscriptions)
+		if len(m.search.results) > 0 && len(m.search.prevResults) == 0 {
 			m.backupSubscriptionList()
 		}
 	case "episodes":

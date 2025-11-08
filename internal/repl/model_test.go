@@ -691,3 +691,621 @@ func TestConfigNavigationFromMainMenu(t *testing.T) {
 		t.Errorf("Expected to see main menu, got: %s", view)
 	}
 }
+
+// TestSearchInBothPodcastsAndEpisodesSubmenus tests the scenario where user enters search in
+// both podcasts submenu and episodes submenu. This was causing the application to brick.
+func TestSearchInBothPodcastsAndEpisodesSubmenus(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	// Subscribe to a podcast first so we have episodes
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "stub", Title: "Stub Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	// Get initial episodes list
+	epRes, err := a.Execute(ctx, "episodes")
+	if err != nil {
+		t.Fatalf("Execute(episodes) error = %v", err)
+	}
+	if len(epRes.EpisodeResults) == 0 {
+		t.Fatal("expected at least one episode result")
+	}
+
+	// Get initial subscriptions list
+	subRes, err := a.Execute(ctx, "list subscriptions")
+	if err != nil {
+		t.Fatalf("Execute(list subscriptions) error = %v", err)
+	}
+	if len(subRes.SearchResults) == 0 {
+		t.Fatal("expected at least one subscription")
+	}
+
+	m := model{
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active:  true,
+			context: "subscriptions",
+			title:   "Subscriptions",
+			hint:    "Press 's' to search",
+			results: append([]app.SearchResult(nil), subRes.SearchResults...),
+			cursor:  0,
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Step 1: From subscriptions view, press 's' to enter search
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode to activate from subscriptions")
+	}
+	if m.searchTarget != "podcasts" {
+		t.Fatalf("expected search target podcasts, got %s", m.searchTarget)
+	}
+	if m.searchReturn != "subscriptions" {
+		t.Fatalf("expected searchReturn=subscriptions, got %s", m.searchReturn)
+	}
+	if m.searchParent != "subscriptions" {
+		t.Fatalf("expected searchParent=subscriptions, got %s", m.searchParent)
+	}
+	if len(m.search.prevResults) == 0 {
+		t.Fatal("expected subscription list to be backed up")
+	}
+
+	// Step 2: Execute a podcast search
+	for _, r := range "Test" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	// Should now have podcast search results
+	if !m.search.active {
+		t.Fatal("expected search view to be active after podcast search")
+	}
+
+	// Step 3: Press 'q' to exit search results and return to menu
+	// Note: In the test environment, the search may not return valid results or may clear
+	// the backup, so we can't reliably test restoration here. Just verify we can exit.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(model)
+
+	// After 'q', we should be back at the menu
+	if !m.commandMenu.active {
+		t.Fatal("expected to be back at command menu after exiting search")
+	}
+
+	// Step 4: Now navigate to episodes view
+
+	// Navigate to episodes
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	m = updated.(model)
+	if !m.episodes.active {
+		t.Fatal("expected episodes view to be active")
+	}
+
+	// Step 5: From episodes view, press 's' to enter search
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode to activate from episodes")
+	}
+	if m.searchTarget != "episodes" {
+		t.Fatalf("expected search target episodes, got %s", m.searchTarget)
+	}
+	if m.searchReturn != "episodes" {
+		t.Fatalf("expected searchReturn=episodes, got %s", m.searchReturn)
+	}
+	// Bug check: searchParent should be empty for episodes search
+	if m.searchParent != "" {
+		t.Fatalf("expected searchParent to be empty for episodes search, got %s", m.searchParent)
+	}
+	if len(m.episodes.previousResults) == 0 {
+		t.Fatal("expected episode list to be backed up")
+	}
+
+	// Step 6: Execute an episode search
+	for _, r := range "Episode" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	// Should now have episode search results
+	if !m.episodes.active {
+		t.Fatal("expected episodes view to remain active after episode search")
+	}
+	if !m.episodes.showingSearch {
+		t.Fatal("expected episodes view to show search results")
+	}
+
+	// Step 7: Press 'x' to exit episode search and return to episode list
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(model)
+
+	// Critical bug check: Should restore to episode list, not brick
+	if !m.episodes.active {
+		t.Fatal("expected episodes view to remain active after exiting search")
+	}
+	if m.episodes.showingSearch {
+		t.Fatal("expected episodes showingSearch to be false after restoring list")
+	}
+	if len(m.episodes.results) == 0 {
+		t.Fatal("expected episodes list to be restored")
+	}
+
+	// Step 8: Verify we can navigate back to menu without issues
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(model)
+	if !m.commandMenu.active {
+		t.Fatal("expected to return to command menu")
+	}
+	if m.episodes.active {
+		t.Fatal("expected episodes view to be deactivated")
+	}
+	if m.search.active {
+		t.Fatal("expected search view to be deactivated")
+	}
+
+	// Step 9: Try rendering the view (application should not brick)
+	view := m.View()
+	if view == "" {
+		t.Fatal("expected non-empty view, got empty (application bricked)")
+	}
+	if !strings.Contains(view, "Podsink") {
+		t.Fatalf("expected to see main menu, got: %s", view)
+	}
+}
+
+// TestSearchStateIsolationBetweenPodcastsAndEpisodes verifies that search state for podcasts
+// and episodes is properly isolated and doesn't interfere with each other
+func TestSearchStateIsolationBetweenPodcastsAndEpisodes(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	// Subscribe to a podcast
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "stub", Title: "Stub Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	// Get subscriptions
+	subRes, err := a.Execute(ctx, "list subscriptions")
+	if err != nil {
+		t.Fatalf("Execute(list subscriptions) error = %v", err)
+	}
+
+	// Get episodes
+	epRes, err := a.Execute(ctx, "episodes")
+	if err != nil {
+		t.Fatalf("Execute(episodes) error = %v", err)
+	}
+
+	m := model{
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active:  true,
+			context: "subscriptions",
+			results: append([]app.SearchResult(nil), subRes.SearchResults...),
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Start podcast search
+	m.beginSearchInput("podcasts", "search> ", "Enter query...", "subscriptions")
+
+	// Verify backup was created
+	if len(m.search.prevResults) != len(subRes.SearchResults) {
+		t.Fatal("expected subscription backup to be created")
+	}
+	if m.searchParent != "subscriptions" {
+		t.Fatalf("expected searchParent=subscriptions, got %s", m.searchParent)
+	}
+
+	// Save state before switching to episodes
+	subscriptionBackupCount := len(m.search.prevResults)
+
+	// Switch to episodes view
+	m.episodes.active = true
+	m.episodes.results = epRes.EpisodeResults
+	m.search.active = false
+	m.searchInputMode = false
+
+	// Start episode search
+	m.beginSearchInput("episodes", "episodes search> ", "Enter query...", "episodes")
+
+	// Verify episode backup was created
+	if len(m.episodes.previousResults) != len(epRes.EpisodeResults) {
+		t.Fatal("expected episode backup to be created")
+	}
+	// Bug check: searchParent should be empty for episodes
+	if m.searchParent != "" {
+		t.Fatalf("expected searchParent to be empty for episodes, got %s", m.searchParent)
+	}
+
+	// Critical: Verify subscription backup is still intact
+	if len(m.search.prevResults) != subscriptionBackupCount {
+		t.Fatalf("expected subscription backup to remain intact (%d items), but got %d items",
+			subscriptionBackupCount, len(m.search.prevResults))
+	}
+}
+
+// TestSearchInputModeStateTransitions verifies that searchInputMode properly transitions
+// when switching between different search contexts
+func TestSearchInputModeStateTransitions(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	m := model{
+		ctx:           ctx,
+		app:           a,
+		input:         textinput.New(),
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Test transition: subscriptions search -> ESC
+	m.searchInputMode = true
+	m.searchTarget = "podcasts"
+	m.searchReturn = "subscriptions"
+	m.searchParent = "subscriptions"
+	m.search.active = true
+	m.search.results = []app.SearchResult{{Podcast: itunes.Podcast{ID: "1"}}}
+	m.search.prevResults = []app.SearchResult{{Podcast: itunes.Podcast{ID: "backup"}}}
+
+	// Press ESC to exit search input
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+
+	if m.searchInputMode {
+		t.Fatal("expected searchInputMode to be false after ESC")
+	}
+	// After the bug fix: searchParent and backup should be PRESERVED (not cleared)
+	// so that pressing 'x' later can restore the original view
+	if m.searchParent != "subscriptions" {
+		t.Fatalf("expected searchParent to remain 'subscriptions', got %q", m.searchParent)
+	}
+	if len(m.search.prevResults) != 1 {
+		t.Fatalf("expected subscription backup to be preserved (1 item), got %d", len(m.search.prevResults))
+	}
+
+	// Test transition: episodes search -> ESC
+	m = model{
+		ctx:           ctx,
+		app:           a,
+		input:         textinput.New(),
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+	m.searchInputMode = true
+	m.searchTarget = "episodes"
+	m.searchReturn = "episodes"
+	m.searchParent = ""
+	m.episodes.active = true
+	m.episodes.results = []app.EpisodeResult{{Episode: domain.EpisodeRow{ID: "1"}}}
+	m.episodes.previousResults = []app.EpisodeResult{{Episode: domain.EpisodeRow{ID: "backup"}}}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+
+	if m.searchInputMode {
+		t.Fatal("expected searchInputMode to be false after ESC from episodes")
+	}
+	if len(m.episodes.previousResults) != 0 {
+		t.Fatal("expected episode backup to be cleared after ESC")
+	}
+	if m.episodes.showingSearch {
+		t.Fatal("expected showingSearch to be false after ESC")
+	}
+}
+
+// TestNestedSearchCorruptsBackup tests the critical bug where searching within search results
+// corrupts the backup by overwriting the original subscription list with search results
+func TestNestedSearchCorruptsBackup(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	// Subscribe to get some subscriptions
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "sub1", Title: "Subscribed Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	subRes, err := a.Execute(ctx, "list subscriptions")
+	if err != nil {
+		t.Fatalf("Execute(list subscriptions) error = %v", err)
+	}
+
+	originalSubscriptions := append([]app.SearchResult(nil), subRes.SearchResults...)
+
+	m := model{
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active:  true,
+			context: "subscriptions",
+			title:   "Subscriptions",
+			hint:    "Press 's' to search",
+			results: append([]app.SearchResult(nil), originalSubscriptions...),
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Step 1: From subscriptions list, press 's' to enter search
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+
+	// Backup should contain the original subscriptions
+	if len(m.search.prevResults) != len(originalSubscriptions) {
+		t.Fatalf("expected %d items in backup, got %d", len(originalSubscriptions), len(m.search.prevResults))
+	}
+	for i := range originalSubscriptions {
+		if m.search.prevResults[i].Podcast.ID != originalSubscriptions[i].Podcast.ID {
+			t.Fatalf("backup[%d]: expected ID %s, got %s", i,
+				originalSubscriptions[i].Podcast.ID, m.search.prevResults[i].Podcast.ID)
+		}
+	}
+
+	// Step 2: Execute search and get podcast search results
+	for _, r := range "Test" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	// Now m.search.results contains podcast search results (not subscriptions)
+	// But m.search.context should still be "subscriptions" due to searchParent
+	if m.search.context == "subscriptions" {
+		// This is the bug scenario!
+		// Step 3: Press 's' again to search within the results
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+		m = updated.(model)
+
+		// CRITICAL BUG: beginSearchInput will call backupSubscriptionList() again,
+		// which backs up m.search.results (the podcast search results),
+		// OVERWRITING the original subscription backup!
+
+		// The backup should still contain original subscriptions, not search results
+		if len(m.search.prevResults) != len(originalSubscriptions) {
+			t.Fatalf("BUG: backup was corrupted! Expected %d original subscriptions, got %d items",
+				len(originalSubscriptions), len(m.search.prevResults))
+		}
+
+		// Verify the backup still contains the original subscriptions
+		for i := range originalSubscriptions {
+			if i >= len(m.search.prevResults) {
+				break
+			}
+			if m.search.prevResults[i].Podcast.ID != originalSubscriptions[i].Podcast.ID {
+				t.Fatalf("BUG: backup was corrupted! backup[%d]: expected original subscription ID %s, got %s",
+					i, originalSubscriptions[i].Podcast.ID, m.search.prevResults[i].Podcast.ID)
+			}
+		}
+	}
+}
+
+// TestRepeatedSearchInEpisodesCorruptsBackup tests similar corruption in episodes search
+func TestRepeatedSearchInEpisodesCorruptsBackup(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	// Subscribe to get episodes
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "stub", Title: "Stub Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	epRes, err := a.Execute(ctx, "episodes")
+	if err != nil {
+		t.Fatalf("Execute(episodes) error = %v", err)
+	}
+	if len(epRes.EpisodeResults) == 0 {
+		t.Fatal("expected at least one episode")
+	}
+
+	originalEpisodes := append([]app.EpisodeResult(nil), epRes.EpisodeResults...)
+
+	m := model{
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		episodes: episodeView{
+			active:  true,
+			results: append([]app.EpisodeResult(nil), originalEpisodes...),
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Step 1: Press 's' to search episodes
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+
+	// Backup should contain original episodes
+	if len(m.episodes.previousResults) != len(originalEpisodes) {
+		t.Fatalf("expected %d episodes in backup, got %d", len(originalEpisodes), len(m.episodes.previousResults))
+	}
+
+	// Step 2: Execute search
+	for _, r := range "Episode" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	// m.episodes.results now contains episode search results
+	if !m.episodes.showingSearch {
+		t.Fatal("expected episodes to show search results")
+	}
+
+	// Step 3: Press 's' again to search within results
+	// According to beginSearchInput line 739, it checks !m.episodes.showingSearch
+	// So it should NOT backup again if already showing search - this is good!
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+
+	// Verify backup is still intact
+	if len(m.episodes.previousResults) != len(originalEpisodes) {
+		t.Fatalf("BUG: episode backup was corrupted! Expected %d original episodes, got %d items",
+			len(originalEpisodes), len(m.episodes.previousResults))
+	}
+}
+
+// TestSearchFromWithinSearchResults tests the critical bug where pressing 's' while
+// already viewing search results corrupts the backup by overwriting the original
+// subscriptions with search results.
+func TestSearchFromWithinSearchResults(t *testing.T) {
+	a := newTestApp(t)
+
+	// Subscribe to 3 podcasts to create original subscriptions in the database
+	podcast1 := itunes.Podcast{ID: "111", Title: "Original Podcast 1", Author: "Author 1", FeedURL: "http://feed1.com"}
+	podcast2 := itunes.Podcast{ID: "222", Title: "Original Podcast 2", Author: "Author 2", FeedURL: "http://feed2.com"}
+	podcast3 := itunes.Podcast{ID: "333", Title: "Original Podcast 3", Author: "Author 3", FeedURL: "http://feed3.com"}
+
+	for _, p := range []itunes.Podcast{podcast1, podcast2, podcast3} {
+		if _, err := a.SubscribePodcast(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create model with subscriptions view active
+	m := model{
+		ctx:           context.Background(),
+		app:           a,
+		input:         textinput.New(),
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+		search: searchView{
+			active:  true,
+			context: "subscriptions",
+			results: []app.SearchResult{
+				{Podcast: podcast1, IsSubscribed: true},
+				{Podcast: podcast2, IsSubscribed: true},
+				{Podcast: podcast3, IsSubscribed: true},
+			},
+		},
+	}
+
+	originalSubscriptionsCount := len(m.search.results)
+	if originalSubscriptionsCount != 3 {
+		t.Fatalf("Expected 3 original subscriptions, got %d", originalSubscriptionsCount)
+	}
+
+	// Step 1: Press 's' to search for podcasts (first search)
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	updatedModel, _ := m.Update(msg)
+	m = updatedModel.(model)
+
+	// Verify we're in search input mode and backup was created
+	if !m.searchInputMode {
+		t.Fatal("Expected to be in search input mode after pressing 's'")
+	}
+	if m.searchTarget != "podcasts" {
+		t.Fatalf("Expected searchTarget to be 'podcasts', got '%s'", m.searchTarget)
+	}
+
+	// Verify backup was created with original subscriptions
+	if len(m.search.prevResults) != originalSubscriptionsCount {
+		t.Fatalf("Expected backup to contain %d subscriptions, got %d",
+			originalSubscriptionsCount, len(m.search.prevResults))
+	}
+
+	// Step 2: Simulate search results coming back (skip the command execution)
+	// These are NEW podcasts from a search, not from our subscriptions
+	searchResults := []app.SearchResult{
+		{Podcast: itunes.Podcast{ID: "999", Title: "Golang Podcast 1", Author: "Go Author"}, IsSubscribed: false},
+		{Podcast: itunes.Podcast{ID: "888", Title: "Golang Podcast 2", Author: "Go Author 2"}, IsSubscribed: false},
+	}
+
+	result := app.CommandResult{
+		SearchResults: searchResults,
+		SearchTitle:   "Search Results for: golang",
+		SearchHint:    "Use ↑↓/jk to navigate",
+		SearchContext: "subscriptions", // This is the key - search context is still "subscriptions"
+	}
+
+	updatedModel, _ = m.handleCommandResult(result)
+	m = updatedModel.(model)
+
+	// Verify search results are displayed
+	if !m.search.active {
+		t.Fatal("Expected search to be active after receiving results")
+	}
+	if len(m.search.results) != 2 {
+		t.Fatalf("Expected 2 search results, got %d", len(m.search.results))
+	}
+	if m.search.context != "subscriptions" {
+		t.Fatalf("Expected search context to be 'subscriptions', got '%s'", m.search.context)
+	}
+
+	// Step 3: Press 's' AGAIN while viewing search results (THE BUG!)
+	// This should NOT overwrite the original backup with current search results
+	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}}
+	updatedModel, _ = m.Update(msg)
+	m = updatedModel.(model)
+
+	// Verify we're in search input mode again
+	if !m.searchInputMode {
+		t.Fatal("Expected to be in search input mode after pressing 's' again")
+	}
+
+	// THE BUG: The backup should still contain the original 3 subscriptions,
+	// but instead it now contains the 2 search results from step 2!
+	if len(m.search.prevResults) != originalSubscriptionsCount {
+		t.Fatalf("BUG REPRODUCED: backup was overwritten! Expected %d original subscriptions in backup, but got %d items",
+			originalSubscriptionsCount, len(m.search.prevResults))
+	}
+
+	// Verify the backup contains original subscriptions, not search results
+	for i, result := range m.search.prevResults {
+		// Original subscriptions have IDs 111, 222, 333
+		// Search results have IDs 999, 888
+		if result.Podcast.ID == "999" || result.Podcast.ID == "888" {
+			t.Fatalf("BUG REPRODUCED: backup contains search result at index %d (ID=%s) instead of original subscription!",
+				i, result.Podcast.ID)
+		}
+	}
+
+	// Step 4: Cancel the second search
+	escMsg := tea.KeyMsg{Type: tea.KeyEsc}
+	updatedModel, _ = m.Update(escMsg)
+	m = updatedModel.(model)
+
+	// Step 5: Press 'x' to exit search and verify original subscriptions are restored
+	xMsg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}}
+	updatedModel, _ = m.Update(xMsg)
+	m = updatedModel.(model)
+
+	// Verify we're back to original subscriptions
+	if !m.search.active {
+		t.Fatal("Expected search view to be active after restoration")
+	}
+
+	if len(m.search.results) != originalSubscriptionsCount {
+		t.Fatalf("Expected %d original subscriptions after restoration, got %d",
+			originalSubscriptionsCount, len(m.search.results))
+	}
+
+	// Verify the restored results are the original subscriptions, not the search results
+	hasOriginal := false
+	for _, result := range m.search.results {
+		if result.Podcast.ID == "111" || result.Podcast.ID == "222" || result.Podcast.ID == "333" {
+			hasOriginal = true
+			break
+		}
+	}
+	if !hasOriginal {
+		t.Fatal("BUG REPRODUCED: Original subscriptions were lost! Restored results do not contain original subscriptions.")
+	}
+}
