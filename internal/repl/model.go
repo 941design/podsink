@@ -31,11 +31,12 @@ type detailView struct {
 }
 
 type episodeView struct {
-	active  bool
-	results []app.EpisodeResult
-	cursor  int
-	scroll  int
-	details episodeDetailView
+	active          bool
+	results         []app.EpisodeResult
+	cursor          int
+	scroll          int
+	details         episodeDetailView
+	showAllEpisodes bool
 }
 
 type episodeDetailView struct {
@@ -43,6 +44,12 @@ type episodeDetailView struct {
 	detail app.EpisodeDetail
 	scroll int
 	lines  []string
+}
+
+type queueView struct {
+	active  bool
+	results []app.QueuedEpisodeResult
+	cursor  int
 }
 
 type commandMenuItem struct {
@@ -74,6 +81,7 @@ type model struct {
 	commandMenu     commandMenuView
 	search          searchView
 	episodes        episodeView
+	queue           queueView
 
 	longDescCache map[string]string
 }
@@ -93,9 +101,7 @@ func newModel(ctx context.Context, application *app.App) model {
 		{name: "search", usage: "search", description: "Search for podcasts via the iTunes API", shorthand: "[s]"},
 		{name: "list", usage: "podcasts", description: "List all podcast subscriptions", shorthand: "[p]"},
 		{name: "episodes", usage: "episodes", description: "View recent episodes across subscriptions", shorthand: "[e]"},
-		{name: "queue", usage: "queue <episode_id>", description: "Queue an episode for download", shorthand: ""},
-		{name: "download", usage: "download <episode_id>", description: "Download an episode immediately", shorthand: ""},
-		{name: "ignore", usage: "ignore <episode_id>", description: "Toggle the ignored state for an episode", shorthand: ""},
+		{name: "queue", usage: "queue", description: "View download queue status", shorthand: "[q]"},
 		{name: "config", usage: "config [show]", description: "View or edit application configuration", shorthand: "[c]"},
 		{name: "exit", usage: "exit", description: "Exit the application", shorthand: "[x]"},
 	}
@@ -180,11 +186,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, nil
 						}
 						return m.handleCommandResult(result)
-					case "queue", "download", "ignore":
-						// Prompt for episode ID
-						m.input.SetValue(selectedItem.name + " ")
-						m.input.SetCursor(len(selectedItem.name + " "))
-						return m, nil
 					default:
 						// Execute the command directly
 						result, err := m.app.Execute(m.ctx, selectedItem.name)
@@ -231,6 +232,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.commandMenu.active = false
 				m.input.Focus()
 				result, err := m.app.Execute(m.ctx, "config")
+				if err != nil {
+					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "q":
+				// Shortcut for queue
+				m.commandMenu.active = false
+				m.input.Focus()
+				result, err := m.app.Execute(m.ctx, "queue")
 				if err != nil {
 					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 					return m, nil
@@ -415,7 +426,87 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return m, nil
+			case "i":
+				// Ignore/unignore the selected episode
+				if m.episodes.cursor < len(m.episodes.results) {
+					selected := m.episodes.results[m.episodes.cursor]
+					result, err := m.app.Execute(m.ctx, "ignore "+selected.Episode.ID)
+					if err != nil {
+						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						return m, nil
+					}
+					if result.Message != "" {
+						m.messages = append(m.messages, result.Message)
+					}
+					// Refresh the episode list
+					result, err = m.app.Execute(m.ctx, "episodes")
+					if err != nil {
+						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						return m, nil
+					}
+					return m.handleCommandResult(result)
+				}
+				return m, nil
+			case "a":
+				// Toggle showing all episodes vs hiding ignored ones
+				m.episodes.showAllEpisodes = !m.episodes.showAllEpisodes
+				// Refresh the episode list
+				result, err := m.app.Execute(m.ctx, "episodes")
+				if err != nil {
+					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "f":
+				// Fetch/queue the selected episode for download
+				if m.episodes.cursor < len(m.episodes.results) {
+					selected := m.episodes.results[m.episodes.cursor]
+					result, err := m.app.Execute(m.ctx, "queue "+selected.Episode.ID)
+					if err != nil {
+						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						return m, nil
+					}
+					if result.Message != "" {
+						m.messages = append(m.messages, result.Message)
+					}
+					// Refresh the episode list
+					result, err = m.app.Execute(m.ctx, "episodes")
+					if err != nil {
+						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						return m, nil
+					}
+					return m.handleCommandResult(result)
+				}
+				return m, nil
 			}
+		}
+
+		// Handle queue mode navigation
+		if m.queue.active {
+			switch msg.String() {
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			case "esc", "x":
+				// Exit queue mode - return to main menu
+				m.queue.active = false
+				m.queue.results = nil
+				m.queue.cursor = 0
+				m.commandMenu.active = true
+				m.input.Blur()
+				return m, nil
+			case "up", "k":
+				if m.queue.cursor > 0 {
+					m.queue.cursor--
+				}
+				return m, nil
+			case "down", "j":
+				if m.queue.cursor < len(m.queue.results)-1 {
+					m.queue.cursor++
+				}
+				return m, nil
+			}
+			return m, nil
 		}
 
 		// Handle search input mode
@@ -509,6 +600,11 @@ func (m model) View() string {
 		return m.renderEpisodeList()
 	}
 
+	// If in queue mode, render the queue list
+	if m.queue.active {
+		return m.renderQueueList()
+	}
+
 	// Normal mode: render messages and input
 	var b strings.Builder
 	for _, message := range m.messages {
@@ -544,6 +640,15 @@ func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd
 		m.episodes.scroll = 0
 		m.episodes.details.active = false
 		m.episodes.details = episodeDetailView{}
+		m.input.Blur()
+		return m, nil
+	}
+
+	// Check if we got queued episode results
+	if len(result.QueuedEpisodeResults) > 0 {
+		m.queue.active = true
+		m.queue.results = result.QueuedEpisodeResults
+		m.queue.cursor = 0
 		m.input.Blur()
 		return m, nil
 	}
@@ -897,7 +1002,6 @@ func (m model) renderEpisodeList() string {
 	cursorStyle := m.theme.Cursor
 	normalStyle := m.theme.Normal
 	dimStyle := m.theme.Dim
-	stateStyle := m.theme.State
 	dateStyle := m.theme.Date
 
 	// Calculate window bounds
@@ -907,27 +1011,66 @@ func (m model) renderEpisodeList() string {
 		maxVisible = 12
 	}
 
-	totalEpisodes := len(m.episodes.results)
+	// Filter episodes if not showing all
+	visibleResults := m.episodes.results
+	if !m.episodes.showAllEpisodes {
+		filtered := make([]app.EpisodeResult, 0, len(m.episodes.results))
+		for _, result := range m.episodes.results {
+			if result.Episode.State != "IGNORED" {
+				filtered = append(filtered, result)
+			}
+		}
+		visibleResults = filtered
+	}
+
+	totalEpisodes := len(visibleResults)
 	start := m.episodes.scroll
 	end := start + maxVisible
 	if end > totalEpisodes {
 		end = totalEpisodes
 	}
 
+	// Adjust scroll if it's out of bounds after filtering
+	if start >= totalEpisodes && totalEpisodes > 0 {
+		start = 0
+		end = maxVisible
+		if end > totalEpisodes {
+			end = totalEpisodes
+		}
+	}
+
+	// Header
+	viewMode := "All Episodes"
+	if !m.episodes.showAllEpisodes {
+		viewMode = "Episodes (hiding ignored)"
+	}
 	if totalEpisodes > 0 {
 		if totalEpisodes > maxVisible {
-			b.WriteString(headerStyle.Render(fmt.Sprintf("All Episodes (Newest First) - showing %d-%d of %d", start+1, end, totalEpisodes)))
+			b.WriteString(headerStyle.Render(fmt.Sprintf("%s (Newest First) - showing %d-%d of %d", viewMode, start+1, end, totalEpisodes)))
 		} else {
-			b.WriteString(headerStyle.Render(fmt.Sprintf("All Episodes (Newest First) - %d total", totalEpisodes)))
+			b.WriteString(headerStyle.Render(fmt.Sprintf("%s (Newest First) - %d total", viewMode, totalEpisodes)))
 		}
 		b.WriteString("\n")
+	} else {
+		b.WriteString(headerStyle.Render("No episodes to display"))
+		b.WriteString("\n")
 	}
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [x]/Esc to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [i] ignore, [a] toggle all, [f] fetch, [x]/Esc to exit"))
 	b.WriteString("\n\n")
+
+	// Column abbreviation settings
+	podcastMaxLen := cfg.PodcastNameMaxLength
+	if podcastMaxLen <= 0 {
+		podcastMaxLen = 16
+	}
+	episodeMaxLen := cfg.EpisodeNameMaxLength
+	if episodeMaxLen <= 0 {
+		episodeMaxLen = 40
+	}
 
 	// Only render the visible window
 	for i := start; i < end; i++ {
-		result := m.episodes.results[i]
+		result := visibleResults[i]
 		ep := result.Episode
 		cursor := "  "
 		style := normalStyle
@@ -938,17 +1081,129 @@ func (m model) renderEpisodeList() string {
 		}
 
 		// Format published date
-		published := "Unknown"
+		published := "Unknown   "
 		if ep.HasPublish {
 			published = ep.PublishedAt.Format("2006-01-02")
 		}
 
-		// Format: → [STATE] 2024-01-01 Episode Title
-		line := cursor + stateStyle.Render(fmt.Sprintf("[%-11s]", ep.State)) + " " +
-			dateStyle.Render(published) + " " + style.Render(ep.Title)
-		if result.PodcastTitle != "" {
-			line += " " + dimStyle.Render("· "+result.PodcastTitle)
+		// Abbreviate podcast name
+		podcastName := result.PodcastTitle
+		if podcastName == "" {
+			podcastName = "Unknown"
 		}
+		if len(podcastName) > podcastMaxLen {
+			podcastName = podcastName[:podcastMaxLen-3] + "..."
+		}
+		// Pad to fixed width for alignment
+		podcastName = fmt.Sprintf("%-*s", podcastMaxLen, podcastName)
+
+		// Abbreviate episode title
+		episodeTitle := ep.Title
+		if len(episodeTitle) > episodeMaxLen {
+			episodeTitle = episodeTitle[:episodeMaxLen-3] + "..."
+		}
+
+		// Format size in MB
+		var sizeStr string
+		if ep.SizeBytes > 0 {
+			sizeMB := float64(ep.SizeBytes) / (1024 * 1024)
+			sizeStr = fmt.Sprintf("%6.1f MB", sizeMB)
+		} else {
+			sizeStr = "       --"
+		}
+
+		// Format: → DATE PODCAST_NAME EPISODE_TITLE SIZE
+		line := cursor + dateStyle.Render(published) + " " +
+			dimStyle.Render(podcastName) + " " + style.Render(episodeTitle) + " " +
+			dimStyle.Render(sizeStr)
+
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m model) renderQueueList() string {
+	var b strings.Builder
+
+	headerStyle := m.theme.Header
+	cursorStyle := m.theme.Cursor
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+	dateStyle := m.theme.Date
+
+	totalQueued := len(m.queue.results)
+
+	// Header
+	if totalQueued > 0 {
+		b.WriteString(headerStyle.Render(fmt.Sprintf("Download Queue - %d episode(s)", totalQueued)))
+		b.WriteString("\n")
+	} else {
+		b.WriteString(headerStyle.Render("Download Queue - Empty"))
+		b.WriteString("\n")
+	}
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, [x]/Esc to return to main menu"))
+	b.WriteString("\n\n")
+
+	// Column abbreviation settings
+	cfg := m.app.Config()
+	podcastMaxLen := cfg.PodcastNameMaxLength
+	if podcastMaxLen <= 0 {
+		podcastMaxLen = 16
+	}
+	episodeMaxLen := cfg.EpisodeNameMaxLength
+	if episodeMaxLen <= 0 {
+		episodeMaxLen = 40
+	}
+
+	for i, result := range m.queue.results {
+		ep := result.Episode
+		cursor := "  "
+		style := normalStyle
+
+		if i == m.queue.cursor {
+			cursor = "→ "
+			style = cursorStyle
+		}
+
+		// Format enqueued time
+		enqueued := "Unknown   "
+		if !result.EnqueuedAt.IsZero() {
+			enqueued = result.EnqueuedAt.Format("2006-01-02")
+		}
+
+		// Abbreviate podcast name
+		podcastName := result.PodcastTitle
+		if podcastName == "" {
+			podcastName = "Unknown"
+		}
+		if len(podcastName) > podcastMaxLen {
+			podcastName = podcastName[:podcastMaxLen-3] + "..."
+		}
+		// Pad to fixed width for alignment
+		podcastName = fmt.Sprintf("%-*s", podcastMaxLen, podcastName)
+
+		// Abbreviate episode title
+		episodeTitle := ep.Title
+		if len(episodeTitle) > episodeMaxLen {
+			episodeTitle = episodeTitle[:episodeMaxLen-3] + "..."
+		}
+
+		// Format status
+		var statusStr string
+		if result.RetryCount > 0 {
+			statusStr = fmt.Sprintf("Error (retries: %d)", result.RetryCount)
+		} else {
+			statusStr = "Queued"
+		}
+		statusStr = fmt.Sprintf("%-20s", statusStr)
+
+		// Format: → DATE PODCAST_NAME EPISODE_TITLE STATUS
+		line := cursor + dateStyle.Render(enqueued) + " " +
+			dimStyle.Render(podcastName) + " " + style.Render(episodeTitle) + " " +
+			dimStyle.Render(statusStr)
+
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
@@ -979,6 +1234,12 @@ func (m model) renderEpisodeDetails() string {
 
 	if detail.HasPublish {
 		b.WriteString(dateStyle.Render("Published: " + detail.PublishedAt.Format("2006-01-02 15:04")))
+		b.WriteString("\n")
+	}
+
+	if detail.SizeBytes > 0 {
+		sizeMB := float64(detail.SizeBytes) / (1024 * 1024)
+		b.WriteString(normalStyle.Render(fmt.Sprintf("Size: %.1f MB", sizeMB)))
 		b.WriteString("\n")
 	}
 
@@ -1193,7 +1454,7 @@ func (m model) renderCommandMenu() string {
 
 	b.WriteString(headerStyle.Render("Podsink - Podcast Manager"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [c]onfig, ESC/[x] to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ueue [c]onfig, ESC/[x] to exit"))
 	b.WriteString("\n\n")
 
 	for i, item := range m.commandMenu.items {

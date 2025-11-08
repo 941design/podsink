@@ -43,13 +43,14 @@ const (
 )
 
 type CommandResult struct {
-	Message        string
-	Quit           bool
-	SearchResults  []SearchResult
-	SearchTitle    string
-	SearchHint     string
-	SearchContext  string
-	EpisodeResults []domain.EpisodeResult
+	Message              string
+	Quit                 bool
+	SearchResults        []SearchResult
+	SearchTitle          string
+	SearchHint           string
+	SearchContext        string
+	EpisodeResults       []domain.EpisodeResult
+	QueuedEpisodeResults []domain.QueuedEpisodeResult
 }
 
 type SearchResult struct {
@@ -64,6 +65,8 @@ type SearchResult struct {
 type EpisodeResult = domain.EpisodeResult
 
 type EpisodeDetail = domain.EpisodeDetail
+
+type QueuedEpisodeResult = domain.QueuedEpisodeResult
 
 var (
 	ErrNoSubscriptionsToExport = subscriptions.ErrNoSubscriptionsToExport
@@ -204,10 +207,11 @@ func (a *App) registerCommands() {
 	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
 	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
 	a.registerCommand("episodes", "episodes", "View recent episodes across subscriptions", a.episodesCommand, "e", "le")
-	a.registerCommand("queue", "queue <episode_id>", "Queue an episode for download", a.queueCommand)
-	a.registerCommand("download", "download <episode_id>", "Download an episode immediately", a.downloadCommand)
-	a.registerCommand("ignore", "ignore <episode_id>", "Toggle the ignored state for an episode", a.ignoreCommand)
+	a.registerCommand("queue", "queue [episode_id]", "View download queue status or queue an episode", a.queueCommand, "q")
 	a.registerCommand("import", "import <file>", "Import subscriptions from an OPML file", a.importCommand)
+	// Register download and ignore commands (not in help menu, but available for shortcuts)
+	a.commands["download"] = &command{usage: "download <episode_id>", summary: "Download an episode immediately", handler: a.downloadCommand}
+	a.commands["ignore"] = &command{usage: "ignore <episode_id>", summary: "Toggle the ignored state for an episode", handler: a.ignoreCommand}
 	a.registerCommand("export", "export <file>", "Export subscriptions to an OPML file", a.exportCommand)
 }
 
@@ -449,40 +453,55 @@ func (a *App) episodesCommand(ctx context.Context, args []string) (CommandResult
 }
 
 func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, error) {
-	if len(args) != 1 {
-		return CommandResult{Message: "Usage: queue <episode_id>"}, nil
-	}
-	episodeID := strings.TrimSpace(args[0])
-	if episodeID == "" {
-		return CommandResult{Message: "Episode ID cannot be empty."}, nil
-	}
-
-	info, err := a.episodes.FetchEpisodeInfo(ctx, episodeID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return CommandResult{Message: "Episode not found."}, nil
+	// With arguments: queue an episode
+	if len(args) == 1 {
+		episodeID := strings.TrimSpace(args[0])
+		if episodeID == "" {
+			return CommandResult{Message: "Episode ID cannot be empty."}, nil
 		}
+
+		info, err := a.episodes.FetchEpisodeInfo(ctx, episodeID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return CommandResult{Message: "Episode not found."}, nil
+			}
+			return CommandResult{}, err
+		}
+
+		switch info.State {
+		case stateIgnored:
+			return CommandResult{Message: "Episode is ignored. Unignore before queueing."}, nil
+		case stateQueued:
+			return CommandResult{Message: "Episode is already queued."}, nil
+		}
+
+		if err := a.downloads.EnqueueEpisode(ctx, info.ID); err != nil {
+			return CommandResult{}, err
+		}
+		if a.downloadMgr != nil {
+			a.downloadMgr.Notify()
+		}
+
+		if info.State == stateDownloaded {
+			return CommandResult{Message: fmt.Sprintf("Episode %s queued for re-download.", info.ID)}, nil
+		}
+		return CommandResult{Message: fmt.Sprintf("Episode %s queued for download.", info.ID)}, nil
+	}
+
+	// Without arguments: list queued episodes
+	if len(args) != 0 {
+		return CommandResult{Message: "Usage: queue [episode_id]"}, nil
+	}
+
+	queuedEpisodes, err := a.episodes.ListQueued(ctx)
+	if err != nil {
 		return CommandResult{}, err
 	}
-
-	switch info.State {
-	case stateIgnored:
-		return CommandResult{Message: "Episode is ignored. Unignore before queueing."}, nil
-	case stateQueued:
-		return CommandResult{Message: "Episode is already queued."}, nil
+	if len(queuedEpisodes) == 0 {
+		return CommandResult{Message: "Download queue is empty."}, nil
 	}
 
-	if err := a.downloads.EnqueueEpisode(ctx, info.ID); err != nil {
-		return CommandResult{}, err
-	}
-	if a.downloadMgr != nil {
-		a.downloadMgr.Notify()
-	}
-
-	if info.State == stateDownloaded {
-		return CommandResult{Message: fmt.Sprintf("Episode %s queued for re-download.", info.ID)}, nil
-	}
-	return CommandResult{Message: fmt.Sprintf("Episode %s queued for download.", info.ID)}, nil
+	return CommandResult{QueuedEpisodeResults: queuedEpisodes}, nil
 }
 
 func (a *App) downloadCommand(ctx context.Context, args []string) (CommandResult, error) {

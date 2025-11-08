@@ -84,9 +84,9 @@ ON CONFLICT(id) DO UPDATE SET title=excluded.title, feed_url=excluded.feed_url, 
 		}
 
 		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO episodes
-(id, podcast_id, title, description, state, published_at, enclosure_url)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			episodeID, data.Podcast.ID, epTitle, description, domain.EpisodeStateNew, published, ep.Enclosure)
+(id, podcast_id, title, description, state, published_at, enclosure_url, size_bytes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			episodeID, data.Podcast.ID, epTitle, description, domain.EpisodeStateNew, published, ep.Enclosure, ep.SizeBytes)
 		if err != nil {
 			return 0, err
 		}
@@ -99,9 +99,10 @@ podcast_id = ?,
 title = ?,
 description = ?,
 enclosure_url = ?,
-published_at = COALESCE(?, published_at)
+published_at = COALESCE(?, published_at),
+size_bytes = ?
 WHERE id = ?`,
-			data.Podcast.ID, epTitle, description, ep.Enclosure, published, episodeID); err != nil {
+			data.Podcast.ID, epTitle, description, ep.Enclosure, published, ep.SizeBytes, episodeID); err != nil {
 			return 0, err
 		}
 	}
@@ -156,7 +157,7 @@ ORDER BY LOWER(p.title)`, domain.EpisodeStateNew, domain.EpisodeStateDownloaded)
 }
 
 func (s *Store) ListEpisodes(ctx context.Context) ([]domain.EpisodeResult, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.title, e.state, e.published_at, p.id, p.title
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.title, e.state, e.published_at, e.size_bytes, p.id, p.title
 FROM episodes e
 JOIN podcasts p ON p.id = e.podcast_id
 ORDER BY
@@ -174,7 +175,7 @@ ORDER BY
 		var episode domain.EpisodeRow
 		var published sql.NullString
 		var podcastID, podcastTitle string
-		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &podcastID, &podcastTitle); err != nil {
+		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &episode.SizeBytes, &podcastID, &podcastTitle); err != nil {
 			return nil, err
 		}
 		if published.Valid {
@@ -198,6 +199,57 @@ ORDER BY
 	return results, nil
 }
 
+func (s *Store) ListQueuedEpisodes(ctx context.Context) ([]domain.QueuedEpisodeResult, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.title, e.state, e.published_at, e.size_bytes, e.retry_count, p.id, p.title, d.enqueued_at
+FROM episodes e
+JOIN podcasts p ON p.id = e.podcast_id
+JOIN downloads d ON d.episode_id = e.id
+WHERE e.state = ?
+ORDER BY d.priority DESC, d.enqueued_at`, domain.EpisodeStateQueued)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]domain.QueuedEpisodeResult, 0, 32)
+	for rows.Next() {
+		var episode domain.EpisodeRow
+		var published sql.NullString
+		var podcastID, podcastTitle string
+		var retryCount int
+		var enqueuedAt string
+		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &episode.SizeBytes, &retryCount, &podcastID, &podcastTitle, &enqueuedAt); err != nil {
+			return nil, err
+		}
+		if published.Valid {
+			if parsed, err := time.Parse(time.RFC3339Nano, published.String); err == nil {
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
+			} else if parsed, err := time.Parse(time.RFC3339, published.String); err == nil {
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
+			}
+		}
+		var parsedEnqueuedAt time.Time
+		if parsed, err := time.Parse(time.RFC3339Nano, enqueuedAt); err == nil {
+			parsedEnqueuedAt = parsed
+		} else if parsed, err := time.Parse(time.RFC3339, enqueuedAt); err == nil {
+			parsedEnqueuedAt = parsed
+		}
+		results = append(results, domain.QueuedEpisodeResult{
+			Episode:      episode,
+			PodcastID:    podcastID,
+			PodcastTitle: podcastTitle,
+			RetryCount:   retryCount,
+			EnqueuedAt:   parsedEnqueuedAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
 func (s *Store) MarkAllEpisodesSeen(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE state = ?", domain.EpisodeStateSeen, domain.EpisodeStateNew)
 	return err
@@ -208,11 +260,11 @@ func (s *Store) GetEpisodeInfo(ctx context.Context, episodeID string) (domain.Ep
 	var published sql.NullString
 	var filePath sql.NullString
 	var hash sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.title, COALESCE(e.description, ''), e.state, e.published_at, e.file_path, e.enclosure_url, e.hash, p.id, p.title
+	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.title, COALESCE(e.description, ''), e.state, e.published_at, e.file_path, e.enclosure_url, e.hash, e.size_bytes, p.id, p.title
 FROM episodes e
 JOIN podcasts p ON p.id = e.podcast_id
 WHERE e.id = ?`, episodeID).
-		Scan(&info.ID, &info.Title, &info.Description, &info.State, &published, &filePath, &info.EnclosureURL, &hash, &info.PodcastID, &info.PodcastTitle)
+		Scan(&info.ID, &info.Title, &info.Description, &info.State, &published, &filePath, &info.EnclosureURL, &hash, &info.SizeBytes, &info.PodcastID, &info.PodcastTitle)
 	if err != nil {
 		return domain.EpisodeInfo{}, err
 	}

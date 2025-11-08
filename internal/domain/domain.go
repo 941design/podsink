@@ -24,6 +24,7 @@ type EpisodeRow struct {
 	State       string
 	PublishedAt time.Time
 	HasPublish  bool
+	SizeBytes   int64
 }
 
 type EpisodeResult struct {
@@ -44,6 +45,7 @@ type EpisodeInfo struct {
 	Hash         string
 	PodcastID    string
 	PodcastTitle string
+	SizeBytes    int64
 }
 
 type EpisodeDetail struct {
@@ -57,6 +59,15 @@ type EpisodeDetail struct {
 	EnclosureURL string
 	PodcastID    string
 	PodcastTitle string
+	SizeBytes    int64
+}
+
+type QueuedEpisodeResult struct {
+	Episode      EpisodeRow
+	PodcastTitle string
+	PodcastID    string
+	RetryCount   int
+	EnqueuedAt   time.Time
 }
 
 type Podcast struct {
@@ -72,6 +83,7 @@ type EpisodeInput struct {
 	Description string
 	PublishedAt *time.Time
 	Enclosure   string
+	SizeBytes   int64
 }
 
 type SubscriptionData struct {

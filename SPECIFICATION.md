@@ -44,9 +44,9 @@ Production-ready v1.0.
   - `search` - enters search mode (prompt changes to `search>`)
   - `list subscriptions`
   - `episodes` (aliases: `e`, `le`)
-  - `queue [episode_id]`
-  - `download [episode_id]`
-  - `ignore [episode_id]`
+  - `queue [episode_id]` - without args: view download queue; with arg: queue an episode
+  - `download <episode_id>` - download episode immediately (available via command line, not in main menu)
+  - `ignore <episode_id>` - toggle ignored state (available via command line, not in main menu)
   - `config`
   - `exit` / `quit`
 
@@ -118,6 +118,8 @@ Failures are logged but do not alter persistent state.
 | `color_theme` | `default` | UI color palette (`default`, `high_contrast`) |
 | `max_episodes` | 12 | Maximum episodes to display in list view |
 | `max_episode_description_lines` | 12 | Maximum description lines shown before scrolling in episode details |
+| `podcast_name_max_length` | 16 | Maximum characters for podcast name in episode list view |
+| `episode_name_max_length` | 40 | Maximum characters for episode name in episode list view |
 
 ### Data Model Highlights
 **Podcast:** `id`, `title`, `feed_url`, `subscribed_at`  
@@ -211,13 +213,33 @@ After executing a search or running `list subscriptions`, an interactive list of
 - Subscribing/unsubscribing from either the search results or subscriptions list updates the database immediately and reflects in the UI without requiring podcast IDs.
 
 ### Episodes
-- `episodes` lists recorded episodes across subscriptions, newest first, with state badges and podcast titles.
+- `episodes` lists recorded episodes across subscriptions, newest first, with abbreviated podcast names and episode titles.
 - The view displays a limited number of episodes at once (configurable via `max_episodes`, default: 12) with scrolling support using arrow keys or j/k.
+- Episodes are displayed in a columnar format: `DATE | PODCAST_NAME | EPISODE_TITLE | SIZE` where podcast names are abbreviated to `podcast_name_max_length` (default: 16), episode titles to `episode_name_max_length` (default: 40), and size is displayed in MB when available.
 - When scrolling through a long list, the header shows "showing X-Y of Z" to indicate the current window position.
-- Pressing `Enter` from the list opens a detailed episode view with HTML-formatted descriptions converted to plain text. The description initially shows up to `max_episode_description_lines` (default: 12) with ↑↓/j/k scroll support for longer content; `Esc`/`x` returns to the list.
+- The list view supports the following interactive keybindings:
+  - `Enter`: Opens a detailed episode view with HTML-formatted descriptions converted to plain text. The description initially shows up to `max_episode_description_lines` (default: 12) with ↑↓/j/k scroll support for longer content; `Esc`/`x` returns to the list.
+  - `[i]`: Ignore/unignore the selected episode (toggles between `IGNORED` and `SEEN` states).
+  - `[a]`: Toggle between showing all episodes or hiding ignored episodes.
+  - `[f]`: Fetch/queue the selected episode for download (transitions to `QUEUED` state).
+  - `↑↓` or `j/k`: Navigate through the episode list.
+  - `x`, `Esc`, or `q`: Exit episode mode and return to the main menu.
+- By default, ignored episodes are hidden from the list. Press `[a]` to toggle showing all episodes.
 - `queue` transitions episode to `QUEUED`.
 - Successful download → `DOWNLOADED`.
 - Ignore/unignore toggles `IGNORED`/`SEEN`.
+
+### Queue View
+- `queue` without arguments displays all currently queued episodes in an interactive list view.
+- The view shows:
+  - Enqueued date in `YYYY-MM-DD` format
+  - Podcast name (abbreviated to `podcast_name_max_length`)
+  - Episode title (abbreviated to `episode_name_max_length`)
+  - Status: "Queued" or "Error (retries: X)" if retry_count > 0
+- Navigation:
+  - `↑↓` or `j/k`: Navigate through the queue
+  - `x` or `Esc`: Return to main menu
+- If the queue is empty, displays "Download queue is empty." message instead of the interactive view.
 
 ### OPML Import/Export
 - `podsink --export-opml <path>` writes subscriptions to the specified file and exits before launching the REPL.

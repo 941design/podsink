@@ -66,7 +66,8 @@ func applySchema(db *sql.DB) error {
             file_path TEXT,
             enclosure_url TEXT NOT NULL,
             hash TEXT,
-            retry_count INTEGER DEFAULT 0
+            retry_count INTEGER DEFAULT 0,
+            size_bytes INTEGER DEFAULT 0
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_episodes_podcast ON episodes(podcast_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_episodes_state ON episodes(state);`,
@@ -84,6 +85,33 @@ func applySchema(db *sql.DB) error {
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("apply schema: %w", err)
+		}
+	}
+
+	// Apply migrations for existing databases
+	if err := applyMigrations(db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func applyMigrations(db *sql.DB) error {
+	// Migration 1: Add size_bytes column if it doesn't exist
+	var columnExists bool
+	err := db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('episodes')
+		WHERE name = 'size_bytes'
+	`).Scan(&columnExists)
+	if err != nil {
+		return fmt.Errorf("check size_bytes column: %w", err)
+	}
+
+	if !columnExists {
+		_, err := db.Exec(`ALTER TABLE episodes ADD COLUMN size_bytes INTEGER DEFAULT 0`)
+		if err != nil {
+			return fmt.Errorf("add size_bytes column: %w", err)
 		}
 	}
 

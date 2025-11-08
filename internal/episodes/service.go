@@ -19,6 +19,10 @@ func (s *Service) List(ctx context.Context) ([]domain.EpisodeResult, error) {
 	return s.store.ListEpisodes(ctx)
 }
 
+func (s *Service) ListQueued(ctx context.Context) ([]domain.QueuedEpisodeResult, error) {
+	return s.store.ListQueuedEpisodes(ctx)
+}
+
 func (s *Service) MarkAllSeen(ctx context.Context) error {
 	return s.store.MarkAllEpisodesSeen(ctx)
 }
@@ -43,6 +47,7 @@ func (s *Service) EpisodeDetails(ctx context.Context, episodeID string) (domain.
 		EnclosureURL: info.EnclosureURL,
 		PodcastID:    info.PodcastID,
 		PodcastTitle: info.PodcastTitle,
+		SizeBytes:    info.SizeBytes,
 	}, nil
 }
 

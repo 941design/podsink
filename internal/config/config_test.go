@@ -113,3 +113,43 @@ func TestMaxEpisodeDescriptionLinesSaveLoad(t *testing.T) {
 		t.Fatalf("MaxEpisodeDescriptionLines mismatch: got %d want %d", loaded.MaxEpisodeDescriptionLines, 5)
 	}
 }
+
+func TestPodcastNameMaxLengthDefault(t *testing.T) {
+	cfg := Defaults()
+	if cfg.PodcastNameMaxLength != 16 {
+		t.Fatalf("expected default PodcastNameMaxLength=16, got %d", cfg.PodcastNameMaxLength)
+	}
+}
+
+func TestEpisodeNameMaxLengthDefault(t *testing.T) {
+	cfg := Defaults()
+	if cfg.EpisodeNameMaxLength != 40 {
+		t.Fatalf("expected default EpisodeNameMaxLength=40, got %d", cfg.EpisodeNameMaxLength)
+	}
+}
+
+func TestPodcastAndEpisodeNameMaxLengthSaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	original := Defaults()
+	original.PodcastNameMaxLength = 20
+	original.EpisodeNameMaxLength = 50
+
+	if err := Save(path, original); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	if loaded.PodcastNameMaxLength != 20 {
+		t.Fatalf("PodcastNameMaxLength mismatch: got %d want %d", loaded.PodcastNameMaxLength, 20)
+	}
+
+	if loaded.EpisodeNameMaxLength != 50 {
+		t.Fatalf("EpisodeNameMaxLength mismatch: got %d want %d", loaded.EpisodeNameMaxLength, 50)
+	}
+}

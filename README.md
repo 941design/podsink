@@ -66,13 +66,19 @@ podsink> list subscriptions
 # from the highlighted podcast or Enter to view details.
 
 podsink> episodes
-All Episodes (Newest First) - showing 1-12 of 147:
-  → [NEW]  2025-01-15  Building Better Go APIs · Go Time
-    [SEEN] 2025-01-08  Concurrency Patterns · Go Time
-# Use ↑↓/jk to scroll through episodes; Enter to view details and ↑↓/jk to scroll long descriptions
+Episodes (hiding ignored) (Newest First) - showing 1-12 of 147:
+Use ↑↓/jk to navigate, Enter for details, [i] ignore, [a] toggle all, [f] fetch, [x]/Esc to exit
 
-podsink> download ep-001
-Downloaded Building Better Go APIs to /path/to/downloads/Go_Time/Building_Better_Go_APIs.mp3
+  → 2025-01-15 Go Time          Building Better Go APIs                45.2 MB
+    2025-01-08 Go Time          Concurrency Patterns                    52.8 MB
+# Navigate with ↑↓/jk; [i] to ignore; [a] to toggle showing all; [f] to queue for download
+
+podsink> queue
+Download Queue - 2 episode(s)
+Use ↑↓/jk to navigate, [x]/Esc to return to main menu
+
+  → 2025-01-15 Go Time          Building Better Go APIs                Queued
+    2025-01-08 Go Time          Concurrency Patterns                    Queued
 
 podsink> help
 Available commands:
@@ -81,9 +87,7 @@ Available commands:
   search                      Search for podcasts via the iTunes API (enters search mode)
   list subscriptions          List all podcast subscriptions
   episodes                    View recent episodes across subscriptions (aliases: e, le)
-  queue <episode_id>          Queue an episode for download
-  download <episode_id>       Download an episode immediately
-  ignore <episode_id>         Toggle the ignored state for an episode
+  queue [episode_id]          View download queue status or queue an episode
   exit                        Exit the application
 ```
 
@@ -100,9 +104,15 @@ flags `--import-opml <file>` or `--export-opml <file>`.
 ### Episode Management
 
 - `episodes` - Browse all recorded episodes (newest first) across your subscriptions with scrolling support
-- `queue <episode_id>` - Add episode to download queue (background download)
-- `download <episode_id>` - Download episode immediately (foreground)
-- `ignore <episode_id>` - Toggle ignore state (hidden from listings)
+  - Interactive keybindings: `[i]` ignore, `[a]` toggle showing all, `[f]` queue for download
+  - Episodes displayed in columnar format: DATE | PODCAST_NAME | EPISODE_TITLE | SIZE (in MB)
+  - Ignored episodes are hidden by default; press `[a]` to toggle
+- `queue` - View download queue with status (queued, error with retry count)
+  - Shows all episodes currently queued for background download
+  - Displays enqueued date, podcast name, episode title, and download status
+  - Use `queue <episode_id>` to add an episode to the queue
+- `download <episode_id>` - Download episode immediately in foreground (available via command line)
+- `ignore <episode_id>` - Toggle ignore state for an episode (available via command line)
 
 ### Import/Export
 
@@ -135,6 +145,8 @@ tls_verify: true                        # Verify TLS certificates
 color_theme: default                    # UI color theme (see available options below)
 max_episodes: 12                        # Maximum episodes to display in list view
 max_episode_description_lines: 12       # Description lines shown before scrolling in details view
+podcast_name_max_length: 16             # Maximum characters for podcast name in episode list view
+episode_name_max_length: 40             # Maximum characters for episode name in episode list view
 ```
 
 Available themes:

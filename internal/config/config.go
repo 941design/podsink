@@ -29,6 +29,8 @@ type Config struct {
 	ColorTheme                 string `yaml:"color_theme"`
 	MaxEpisodes                int    `yaml:"max_episodes"`
 	MaxEpisodeDescriptionLines int    `yaml:"max_episode_description_lines"`
+	PodcastNameMaxLength       int    `yaml:"podcast_name_max_length"`
+	EpisodeNameMaxLength       int    `yaml:"episode_name_max_length"`
 }
 
 // Defaults returns the baseline configuration used on first run.
@@ -46,6 +48,8 @@ func Defaults() Config {
 		ColorTheme:                 theme.Default,
 		MaxEpisodes:                12,
 		MaxEpisodeDescriptionLines: 12,
+		PodcastNameMaxLength:       16,
+		EpisodeNameMaxLength:       40,
 	}
 }
 

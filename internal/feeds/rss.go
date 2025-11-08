@@ -23,6 +23,7 @@ type Episode struct {
 	Description string
 	PublishedAt time.Time
 	Enclosure   string
+	SizeBytes   int64
 }
 
 // Fetch retrieves and parses an RSS/Atom feed.
@@ -68,12 +69,23 @@ func Fetch(ctx context.Context, client *http.Client, url string) (Podcast, []Epi
 		}
 
 		published, _ := parseTime(item.PubDate)
+
+		// Parse size from enclosure length attribute
+		var sizeBytes int64
+		if item.Enclosure.Length != "" {
+			// strconv.ParseInt handles the conversion
+			if size, err := parseSize(item.Enclosure.Length); err == nil {
+				sizeBytes = size
+			}
+		}
+
 		episodes = append(episodes, Episode{
 			ID:          guid,
 			Title:       strings.TrimSpace(item.Title),
 			Description: strings.TrimSpace(item.Description),
 			PublishedAt: published,
 			Enclosure:   strings.TrimSpace(item.Enclosure.URL),
+			SizeBytes:   sizeBytes,
 		})
 	}
 
@@ -101,6 +113,20 @@ func parseTime(value string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unable to parse time: %s", value)
+}
+
+func parseSize(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	// Parse as int64
+	var size int64
+	_, err := fmt.Sscanf(value, "%d", &size)
+	if err != nil {
+		return 0, fmt.Errorf("parse size: %w", err)
+	}
+	return size, nil
 }
 
 type rssDocument struct {
