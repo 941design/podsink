@@ -23,6 +23,12 @@ type searchView struct {
 	hint    string
 	context string
 	details detailView
+
+	prevResults []app.SearchResult
+	prevTitle   string
+	prevHint    string
+	prevContext string
+	prevCursor  int
 }
 
 type detailView struct {
@@ -37,6 +43,11 @@ type episodeView struct {
 	scroll     int
 	details    episodeDetailView
 	filterMode string // "all", "ignored", "downloaded", or "" (default: not ignored)
+
+	previousResults []app.EpisodeResult
+	previousCursor  int
+	previousScroll  int
+	showingSearch   bool
 }
 
 type episodeDetailView struct {
@@ -84,6 +95,7 @@ type model struct {
 	searchInputMode bool // When true, input is shown for entering search query
 	searchTarget    string
 	searchReturn    string
+	searchParent    string
 	commandMenu     commandMenuView
 	search          searchView
 	episodes        episodeView
@@ -150,6 +162,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if !m.searchInputMode {
+			if len(m.episodes.previousResults) > 0 && msg.String() == "x" {
+				if m.restoreEpisodeList() {
+					return m, nil
+				}
+			}
+			if m.search.active && msg.String() == "x" {
+				if m.searchParent == "subscriptions" && m.restoreSubscriptionsView() {
+					return m, nil
+				}
+			}
+		}
 		// Handle command menu mode navigation
 		if m.commandMenu.active {
 			switch msg.String() {
@@ -332,17 +356,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
-			case "esc", "q", "x":
+			case "x":
+				if m.searchParent == "subscriptions" && m.restoreSubscriptionsView() {
+					return m, nil
+				}
+				fallthrough
+			case "esc", "q":
 				// Exit search mode - return to main menu
-				m.search.active = false
-				m.search.results = nil
-				m.search.title = ""
-				m.search.hint = ""
-				m.search.context = ""
-				m.search.details = detailView{}
-				m.refreshCounts()
-				m.commandMenu.active = true
-				m.input.Blur()
+				m.exitSearchViewToMenu()
 				return m, nil
 			case "up", "k":
 				if m.search.cursor > 0 {
@@ -395,13 +416,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				m.quitting = true
 				return m, tea.Quit
-			case "esc", "q", "x":
+			case "x":
+				if len(m.episodes.previousResults) > 0 && m.restoreEpisodeList() {
+					return m, nil
+				}
+				fallthrough
+			case "esc", "q":
 				// Exit episode mode - return to main menu
 				m.episodes.active = false
 				m.episodes.results = nil
 				m.episodes.details.active = false
 				m.episodes.cursor = 0
 				m.episodes.scroll = 0
+				m.episodes.showingSearch = false
+				m.clearEpisodeBackup()
 				m.refreshCounts()
 				m.commandMenu.active = true
 				m.input.Blur()
@@ -602,11 +630,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 				return m, tea.Quit
 			case tea.KeyEsc:
-				// Exit search input mode - return to main menu
+				// Exit search input mode - return to previous view
 				returnState := m.searchReturn
 				m.searchInputMode = false
 				m.searchTarget = ""
 				m.searchReturn = ""
+				if returnState == "subscriptions" {
+					m.searchParent = ""
+					m.clearSubscriptionBackup()
+				}
+				if returnState == "episodes" {
+					if m.episodes.showingSearch {
+						m.restoreEpisodeList()
+					}
+					m.clearEpisodeBackup()
+				}
 				m.input.SetValue("")
 				m.restoreAfterSearchInput(returnState)
 				return m, nil
@@ -615,13 +653,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				query := strings.TrimSpace(m.input.Value())
 				target := m.searchTarget
 				returnState := m.searchReturn
+				parent := m.searchParent
 				m.searchInputMode = false
 				m.searchTarget = ""
 				m.searchReturn = ""
 				m.input.SetValue("")
 
 				if query == "" {
+					if returnState == "subscriptions" {
+						m.searchParent = ""
+						m.restoreSubscriptionsView()
+					}
+					if returnState == "episodes" {
+						if m.episodes.showingSearch {
+							m.restoreEpisodeList()
+						}
+						m.clearEpisodeBackup()
+					}
 					m.restoreAfterSearchInput(returnState)
+					m.searchInputMode = false
 					return m, nil
 				}
 
@@ -632,8 +682,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				result, err := m.app.Execute(m.ctx, command)
 				if err != nil {
+					if returnState == "subscriptions" {
+						m.searchParent = ""
+						m.clearSubscriptionBackup()
+					}
+					if returnState == "episodes" {
+						if m.episodes.showingSearch {
+							m.restoreEpisodeList()
+						}
+						m.clearEpisodeBackup()
+					}
 					m.restoreAfterSearchInput(returnState)
 					return m, nil
+				}
+
+				if target == "episodes" {
+					if len(result.EpisodeResults) > 0 {
+						m.episodes.showingSearch = true
+					} else {
+						m.episodes.showingSearch = false
+						m.clearEpisodeBackup()
+					}
+					m.searchParent = ""
+				} else if parent == "subscriptions" {
+					if len(result.SearchResults) > 0 {
+						m.searchParent = "subscriptions"
+					} else {
+						m.searchParent = ""
+						m.clearSubscriptionBackup()
+					}
+				} else {
+					m.searchParent = ""
 				}
 				return m.handleCommandResult(result)
 			}
@@ -649,6 +728,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) beginSearchInput(target, prompt, placeholder, returnState string) {
+	switch returnState {
+	case "subscriptions":
+		m.searchParent = "subscriptions"
+		if len(m.search.results) > 0 {
+			m.backupSubscriptionList()
+		}
+	case "episodes":
+		m.searchParent = ""
+		if !m.episodes.showingSearch && len(m.episodes.results) > 0 {
+			m.backupEpisodeList()
+		}
+	default:
+		m.searchParent = ""
+	}
 	m.searchInputMode = true
 	m.searchTarget = target
 	m.searchReturn = returnState
@@ -661,6 +754,7 @@ func (m *model) beginSearchInput(target, prompt, placeholder, returnState string
 }
 
 func (m *model) restoreAfterSearchInput(returnState string) {
+	m.searchInputMode = false
 	switch returnState {
 	case "subscriptions":
 		m.commandMenu.active = false
@@ -679,6 +773,95 @@ func (m *model) restoreAfterSearchInput(returnState string) {
 	m.input.Blur()
 }
 
+func (m *model) backupSubscriptionList() {
+	m.search.prevResults = append([]app.SearchResult(nil), m.search.results...)
+	m.search.prevTitle = m.search.title
+	m.search.prevHint = m.search.hint
+	m.search.prevContext = m.search.context
+	m.search.prevCursor = m.search.cursor
+}
+
+func (m *model) clearSubscriptionBackup() {
+	m.search.prevResults = nil
+	m.search.prevTitle = ""
+	m.search.prevHint = ""
+	m.search.prevContext = ""
+	m.search.prevCursor = 0
+}
+
+func (m *model) restoreSubscriptionsView() bool {
+	if len(m.search.prevResults) == 0 {
+		return false
+	}
+	m.search.results = append([]app.SearchResult(nil), m.search.prevResults...)
+	m.search.cursor = m.search.prevCursor
+	if m.search.cursor >= len(m.search.results) {
+		m.search.cursor = len(m.search.results) - 1
+		if m.search.cursor < 0 {
+			m.search.cursor = 0
+		}
+	}
+	m.search.title = m.search.prevTitle
+	m.search.hint = m.search.prevHint
+	if m.search.prevContext != "" {
+		m.search.context = m.search.prevContext
+	} else {
+		m.search.context = "subscriptions"
+	}
+	m.search.details = detailView{}
+	m.search.active = true
+	m.commandMenu.active = false
+	m.searchParent = ""
+	m.clearSubscriptionBackup()
+	return true
+}
+
+func (m *model) exitSearchViewToMenu() {
+	m.search.active = false
+	m.search.results = nil
+	m.search.title = ""
+	m.search.hint = ""
+	m.search.context = ""
+	m.search.details = detailView{}
+	m.searchParent = ""
+	m.clearSubscriptionBackup()
+	m.refreshCounts()
+	m.commandMenu.active = true
+	m.input.Blur()
+}
+
+func (m *model) backupEpisodeList() {
+	m.episodes.previousResults = append([]app.EpisodeResult(nil), m.episodes.results...)
+	m.episodes.previousCursor = m.episodes.cursor
+	m.episodes.previousScroll = m.episodes.scroll
+}
+
+func (m *model) clearEpisodeBackup() {
+	m.episodes.previousResults = nil
+	m.episodes.previousCursor = 0
+	m.episodes.previousScroll = 0
+	m.episodes.showingSearch = false
+}
+
+func (m *model) restoreEpisodeList() bool {
+	if len(m.episodes.previousResults) == 0 {
+		return false
+	}
+	m.episodes.results = append([]app.EpisodeResult(nil), m.episodes.previousResults...)
+	m.episodes.cursor = m.episodes.previousCursor
+	if m.episodes.cursor >= len(m.episodes.results) {
+		m.episodes.cursor = len(m.episodes.results) - 1
+		if m.episodes.cursor < 0 {
+			m.episodes.cursor = 0
+		}
+	}
+	m.episodes.scroll = m.episodes.previousScroll
+	m.episodes.details = episodeDetailView{}
+	m.episodes.showingSearch = false
+	m.clearEpisodeBackup()
+	return true
+}
+
 func (m model) View() string {
 	// If in command menu mode, render the menu
 	if m.commandMenu.active {
@@ -689,14 +872,14 @@ func (m model) View() string {
 	if m.searchInputMode {
 		var b strings.Builder
 		title := "Search for Podcasts"
-		hint := "Enter search query (Esc to cancel):"
+		hint := "Type a search query and press Enter. Submit blank to return."
 		switch m.searchTarget {
 		case "episodes":
 			title = "Search Episodes"
-			hint = "Enter keywords to find episodes (Esc to cancel):"
+			hint = "Type keywords and press Enter. Submit blank to return."
 		case "podcasts":
 			title = "Search for Podcasts"
-			hint = "Enter search query (Esc to cancel):"
+			hint = "Type a search query and press Enter. Submit blank to return."
 		}
 		b.WriteString(m.theme.Header.Render(title))
 		b.WriteString("\n")
@@ -741,6 +924,7 @@ func (m model) View() string {
 }
 
 func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd) {
+	m.searchInputMode = false
 	// Check if we got interactive search results
 	if len(result.SearchResults) > 0 {
 		m.search.active = true
@@ -756,6 +940,9 @@ func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd
 
 	// Check if we got interactive episode results
 	if len(result.EpisodeResults) > 0 {
+		if len(m.episodes.previousResults) > 0 {
+			m.episodes.showingSearch = true
+		}
 		m.episodes.active = true
 		m.episodes.results = result.EpisodeResults
 		m.episodes.cursor = 0
@@ -926,7 +1113,7 @@ func (m model) renderSearchList() string {
 	}
 	hint := m.search.hint
 	if hint == "" {
-		hint = "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x]/Esc to exit"
+		hint = "Use ↑↓/jk to navigate, Enter for details, [s] subscribe, [u] unsubscribe, [x] to return, Esc to exit"
 	}
 
 	b.WriteString(headerStyle.Render(title))

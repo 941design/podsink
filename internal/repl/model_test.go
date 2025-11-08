@@ -297,6 +297,194 @@ func TestEpisodesSearchShortcutActivatesInput(t *testing.T) {
 	}
 }
 
+func TestSubscriptionsSearchExitWithXRestoresList(t *testing.T) {
+	a := newTestApp(t)
+
+	original := []app.SearchResult{
+		{Podcast: itunes.Podcast{ID: "sub-1", Title: "Subscribed One"}, IsSubscribed: true},
+		{Podcast: itunes.Podcast{ID: "sub-2", Title: "Subscribed Two"}, IsSubscribed: true},
+	}
+
+	m := model{
+		ctx:   context.Background(),
+		app:   a,
+		input: textinput.New(),
+		search: searchView{
+			active:  true,
+			context: "subscriptions",
+			title:   "Subscriptions",
+			hint:    "hint",
+			results: append([]app.SearchResult(nil), original...),
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Start search input via shortcut
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode after pressing s")
+	}
+
+	// Simulate command result returning podcast search results
+	m.searchInputMode = false
+	searchResults := []app.SearchResult{{Podcast: itunes.Podcast{ID: "find-1", Title: "Found"}}}
+	updated, _ = m.handleCommandResult(app.CommandResult{
+		SearchResults: searchResults,
+		SearchTitle:   "Search Results",
+		SearchHint:    "hint",
+		SearchContext: "search",
+	})
+	m = updated.(model)
+
+	if !m.search.active {
+		t.Fatal("expected search view to remain active after displaying results")
+	}
+	if len(m.search.results) != 1 {
+		t.Fatalf("expected 1 search result, got %d", len(m.search.results))
+	}
+
+	// Press x to return to the subscriptions list
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(model)
+
+	if !m.search.active {
+		t.Fatal("expected to remain in search view after returning to subscriptions list")
+	}
+	if m.search.context != "subscriptions" {
+		t.Fatalf("expected subscriptions context after restore, got %q", m.search.context)
+	}
+	if len(m.search.results) != len(original) {
+		t.Fatalf("expected %d subscriptions after restore, got %d", len(original), len(m.search.results))
+	}
+	for i := range original {
+		if m.search.results[i].Podcast.ID != original[i].Podcast.ID {
+			t.Fatalf("subscription %d: expected ID %s, got %s", i, original[i].Podcast.ID, m.search.results[i].Podcast.ID)
+		}
+	}
+}
+
+func TestEpisodesSearchExitWithXRestoresList(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "stub", Title: "Stub Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	res, err := a.Execute(ctx, "episodes")
+	if err != nil {
+		t.Fatalf("Execute(episodes) error = %v", err)
+	}
+	if len(res.EpisodeResults) == 0 {
+		t.Fatal("expected at least one episode result")
+	}
+
+	searchRes, err := a.Execute(ctx, "search episodes Episode")
+	if err != nil {
+		t.Fatalf("Execute(search episodes) error = %v", err)
+	}
+	if len(searchRes.EpisodeResults) == 0 {
+		t.Fatal("expected search results for Episode query")
+	}
+
+	m := model{
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		episodes: episodeView{
+			active:  true,
+			results: append([]app.EpisodeResult(nil), res.EpisodeResults...),
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	// Activate search input
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode to activate")
+	}
+	// Execute search for "Episode"
+	for _, r := range "Episode" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(model)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+
+	if !m.episodes.showingSearch {
+		t.Fatal("expected episodes search results to be active after search")
+	}
+
+	// Press x to return to the previous list
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(model)
+
+	if m.episodes.showingSearch {
+		t.Fatal("expected search flag to be cleared after returning")
+	}
+	if len(m.episodes.results) != len(res.EpisodeResults) {
+		t.Fatalf("expected %d episodes after restore, got %d", len(res.EpisodeResults), len(m.episodes.results))
+	}
+	if m.episodes.results[0].Episode.ID != res.EpisodeResults[0].Episode.ID {
+		t.Fatalf("expected first episode ID %s, got %s", res.EpisodeResults[0].Episode.ID, m.episodes.results[0].Episode.ID)
+	}
+}
+
+func TestEpisodesSearchBlankQueryReturnsToList(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	if _, err := a.SubscribePodcast(ctx, itunes.Podcast{ID: "stub", Title: "Stub Podcast", FeedURL: "http://example.com/feed.xml"}); err != nil {
+		t.Fatalf("SubscribePodcast() error = %v", err)
+	}
+
+	res, err := a.Execute(ctx, "episodes")
+	if err != nil {
+		t.Fatalf("Execute(episodes) error = %v", err)
+	}
+	if len(res.EpisodeResults) == 0 {
+		t.Fatal("expected at least one episode result")
+	}
+
+	m := model{
+		ctx:   ctx,
+		app:   a,
+		input: textinput.New(),
+		episodes: episodeView{
+			active:  true,
+			results: append([]app.EpisodeResult(nil), res.EpisodeResults...),
+		},
+		theme:         theme.ForName(a.Config().ColorTheme),
+		longDescCache: make(map[string]string),
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(model)
+	if !m.searchInputMode {
+		t.Fatal("expected search input mode to activate")
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("expected empty input, got %q", m.input.Value())
+	}
+
+	// Submit blank query
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if !m.episodes.active {
+		t.Fatal("expected episodes view to remain active")
+	}
+	if m.episodes.showingSearch {
+		t.Fatal("expected search flag to remain false after blank submit")
+	}
+	if len(m.episodes.results) != len(res.EpisodeResults) {
+		t.Fatalf("expected %d episodes after blank submit, got %d", len(res.EpisodeResults), len(m.episodes.results))
+	}
+}
+
 func TestEpisodeListEnterShowsDetails(t *testing.T) {
 	a := newTestApp(t)
 	ctx := context.Background()

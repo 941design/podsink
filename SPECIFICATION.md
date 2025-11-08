@@ -58,7 +58,7 @@ The application uses a navigable main menu as the primary interface:
 - **Search Mode:**
   - Triggered from the subscriptions view (`[s]`) or by typing `search <query>` in the REPL.
   - Displays a text input prompt: `search>`
-  - Type a query and press Enter to execute a podcast search
+  - Type a query and press Enter to execute a podcast search; submit an empty query with Enter to return to the previous view
   - Press ESC to cancel and return to the previous view
   - Episodes view also supports `[s]` to open an episode search prompt (`episodes search>`), filtering results by title or podcast
 
@@ -151,11 +151,13 @@ Failures are logged but do not alter persistent state.
 - The application starts with the main menu displaying all available options.
 - Users navigate using ↑↓/jk keys or keyboard shortcuts (p/e/q/c/x).
 - Pressing Enter or a shortcut key activates the selected option.
-- All submenus (search results, episodes, queue, etc.) can be exited with ESC or x to return to the main menu.
+- All submenus (search results, episodes, queue, etc.) can be exited with ESC to return to the main menu. When viewing podcast or episode search results, pressing `x` returns to the respective list instead of leaving the submenu.
 - No traditional command prompt - all interactions are menu-driven with dedicated input modes for search queries.
 
 ### Search & Subscribe Flow
-The `search` command (or `[s]` shortcut from the subscriptions view) enters **search input mode**, where the prompt changes to `search>`. The user types their search query and presses Enter to execute the search. Press `Esc` to exit search mode without searching. When viewing episodes, pressing `[s]` opens an `episodes search>` prompt that filters the episode list by title or podcast.
+The `search` command (or `[s]` shortcut from the subscriptions view) enters **search input mode**, where the prompt changes to `search>`. The user types their search query and presses Enter to execute the search. Submitting an empty query (press Enter on a blank input) closes the prompt and returns to the current list. Press `Esc` to exit search mode without searching. When viewing episodes, pressing `[s]` opens an `episodes search>` prompt that filters the episode list by title or podcast.
+
+While viewing podcast search results invoked from the subscriptions list, pressing `x` returns to the subscriptions list; pressing `Esc` returns to the main menu. Episode searches behave similarly: `x` restores the previous episode list while `Esc` exits to the main menu.
 
 After executing a search or running `list subscriptions`, an interactive list of podcasts is displayed:
 

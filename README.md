@@ -71,14 +71,14 @@ Use ↑↓/jk to navigate, Enter to select, [p]odcasts [e]pisodes [q]ueue [d]own
 **Navigation:**
 - Use ↑↓ or j/k to move through menu items
 - Press Enter or use keyboard shortcuts (p/e/q/d/c/x) to select an option
-- Press ESC or x to exit from any submenu back to the main menu
+- Press ESC to exit from any submenu back to the main menu. When viewing podcast or episode search results, press `x` to return to the respective list; otherwise `x` also exits to the main menu.
 
-**List Subscriptions:** Press `p` or select "podcasts" to view all subscribed podcasts. While in this view, press `s` to open podcast search without returning to the main menu.
+**List Subscriptions:** Press `p` or select "podcasts" to view all subscribed podcasts. While in this view, press `s` to open podcast search without returning to the main menu. Enter a query and press Enter to search; submit an empty query to return to the list.
 
 **View Episodes:** Press `e` or select "episodes" to browse recent episodes. Press `s` at any time to search episodes by title or podcast:
 ```
 Episodes (hiding ignored) (Newest First) - showing 1-12 of 147:
-Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [x]/Esc to exit
+Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [x] return, Esc to exit
 
   → 2025-01-15 Go Time          Building Better Go APIs                45.2 MB
     2025-01-08 Go Time          Concurrency Patterns                    52.8 MB
@@ -106,8 +106,9 @@ flags `--import-opml <file>` or `--export-opml <file>`.
   - Navigate with ↑↓/jk
   - Press Enter for podcast details
   - Press `u` to unsubscribe
-  - Press `s` to search for new podcasts from within the subscriptions list
-  - Press `x` or ESC to return to main menu
+  - Press `s` to search for new podcasts from within the subscriptions list (press Enter to search; submit blank to cancel)
+  - While viewing podcast search results, press `x` to return to the subscriptions list; press ESC to exit to the main menu
+  - Press `x` or ESC to return to the main menu when not viewing search results
 
 - **Episodes** `[e]` - Browse all recorded episodes (newest first)
   - Navigate with ↑↓/jk
@@ -117,8 +118,9 @@ flags `--import-opml <file>` or `--export-opml <file>`.
   - Press `[I]` to show only ignored episodes
   - Press `[D]` to show only downloaded episodes
   - Press `d` to queue episode for download
-  - Press `s` to search episodes by title or podcast
-  - Press `x` or ESC to return to main menu
+  - Press `s` to search episodes by title or podcast (press Enter to search; submit blank to cancel)
+  - While viewing episode search results, press `x` to return to the full episode list; press ESC to exit to the main menu
+  - Press `x` or ESC to return to the main menu when not viewing search results
   - Episodes displayed as: DATE | PODCAST_NAME | EPISODE_TITLE | SIZE (MB)
 
 - **Queue** `[q]` - View download queue
