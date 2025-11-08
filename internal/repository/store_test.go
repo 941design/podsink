@@ -276,3 +276,96 @@ func TestStoreQueueAndDownloadLifecycle(t *testing.T) {
 		t.Fatalf("expected ErrNoDownloadTask after removal, got %v", err)
 	}
 }
+
+func TestListQueuedEpisodesIncludesDownloadedEpisodes(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	now := time.Now().UTC()
+
+	data := domain.SubscriptionData{
+		Podcast: domain.Podcast{
+			ID:        "podcast-queue-test",
+			Title:     "Queue Test Podcast",
+			FeedURL:   "http://example.com/feed.xml",
+			CreatedAt: now,
+		},
+		Episodes: []domain.EpisodeInput{
+			{
+				ID:        "ep-queued",
+				Title:     "Queued Episode",
+				Enclosure: "http://example.com/queued.mp3",
+			},
+			{
+				ID:        "ep-downloaded",
+				Title:     "Downloaded Episode",
+				Enclosure: "http://example.com/downloaded.mp3",
+			},
+		},
+	}
+
+	if _, err := store.SaveSubscription(ctx, data); err != nil {
+		t.Fatalf("SaveSubscription: %v", err)
+	}
+
+	// Queue both episodes
+	if err := store.EnqueueEpisode(ctx, "ep-queued"); err != nil {
+		t.Fatalf("EnqueueEpisode ep-queued: %v", err)
+	}
+	if err := store.EnqueueEpisode(ctx, "ep-downloaded"); err != nil {
+		t.Fatalf("EnqueueEpisode ep-downloaded: %v", err)
+	}
+
+	// Verify both appear in queue
+	queued, err := store.ListQueuedEpisodes(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedEpisodes before download: %v", err)
+	}
+	if len(queued) != 2 {
+		t.Fatalf("queued episodes before download = %d, want 2", len(queued))
+	}
+
+	// Download one episode
+	claimed, err := store.ClaimNextDownload(ctx)
+	if err != nil {
+		t.Fatalf("ClaimNextDownload: %v", err)
+	}
+	if err := store.PersistDownloadResult(ctx, claimed, "/downloads/"+claimed+".mp3", "hash123"); err != nil {
+		t.Fatalf("PersistDownloadResult: %v", err)
+	}
+
+	// Verify downloaded episode's state changed to DOWNLOADED
+	info, err := store.GetEpisodeInfo(ctx, claimed)
+	if err != nil {
+		t.Fatalf("GetEpisodeInfo: %v", err)
+	}
+	if info.State != domain.EpisodeStateDownloaded {
+		t.Fatalf("downloaded episode state = %s, want %s", info.State, domain.EpisodeStateDownloaded)
+	}
+
+	// FIXED: Downloaded episodes should NOT appear in the queue list
+	// They are removed from the downloads table when successfully downloaded
+	queued, err = store.ListQueuedEpisodes(ctx)
+	if err != nil {
+		t.Fatalf("ListQueuedEpisodes after download: %v", err)
+	}
+	if len(queued) != 1 {
+		t.Errorf("queued episodes after download = %d, want 1 (only QUEUED episodes should appear)", len(queued))
+	}
+
+	// Verify only the QUEUED episode remains in queue
+	if len(queued) == 1 && queued[0].Episode.State != domain.EpisodeStateQueued {
+		t.Errorf("remaining episode state = %s, want %s", queued[0].Episode.State, domain.EpisodeStateQueued)
+	}
+
+	// Verify the downloaded episode appears in downloads list
+	downloaded, err := store.ListDownloadedEpisodes(ctx)
+	if err != nil {
+		t.Fatalf("ListDownloadedEpisodes: %v", err)
+	}
+	if len(downloaded) != 1 {
+		t.Errorf("downloaded episodes = %d, want 1", len(downloaded))
+	}
+	if len(downloaded) == 1 && downloaded[0].Episode.State != domain.EpisodeStateDownloaded {
+		t.Errorf("downloaded episode state = %s, want %s", downloaded[0].Episode.State, domain.EpisodeStateDownloaded)
+	}
+}

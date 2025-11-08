@@ -40,17 +40,20 @@ const (
 	stateIgnored    = domain.EpisodeStateIgnored
 	stateQueued     = domain.EpisodeStateQueued
 	stateDownloaded = domain.EpisodeStateDownloaded
+	stateDeleted    = domain.EpisodeStateDeleted
 )
 
 type CommandResult struct {
-	Message              string
-	Quit                 bool
-	SearchResults        []SearchResult
-	SearchTitle          string
-	SearchHint           string
-	SearchContext        string
-	EpisodeResults       []domain.EpisodeResult
-	QueuedEpisodeResults []domain.QueuedEpisodeResult
+	Message                  string
+	Quit                     bool
+	SearchResults            []SearchResult
+	SearchTitle              string
+	SearchHint               string
+	SearchContext            string
+	EpisodeResults           []domain.EpisodeResult
+	QueuedEpisodeResults     []domain.QueuedEpisodeResult
+	DownloadedEpisodeResults []domain.EpisodeResult
+	DanglingFiles            []domain.DanglingFile
 }
 
 type SearchResult struct {
@@ -68,6 +71,8 @@ type EpisodeDetail = domain.EpisodeDetail
 
 type QueuedEpisodeResult = domain.QueuedEpisodeResult
 
+type DanglingFile = domain.DanglingFile
+
 var (
 	ErrNoSubscriptionsToExport = subscriptions.ErrNoSubscriptionsToExport
 	ErrNoSubscriptionsInOPML   = subscriptions.ErrNoSubscriptionsInOPML
@@ -80,7 +85,6 @@ type App struct {
 	httpClient    *http.Client
 	itunes        *itunes.Client
 	commands      map[string]*command
-	helpList      []*command
 	subscriptions *subscriptions.Service
 	episodes      *episodes.Service
 	downloads     *downloads.Service
@@ -131,7 +135,6 @@ func NewWithDependencies(cfg config.Config, configPath string, db *sql.DB, deps 
 		httpClient:    httpClient,
 		itunes:        itunesClient,
 		commands:      make(map[string]*command),
-		helpList:      make([]*command, 0, 16),
 		subscriptions: subsSvc,
 		episodes:      episodesSvc,
 		downloads:     downloadsSvc,
@@ -173,6 +176,15 @@ func (a *App) Close() error {
 	return nil
 }
 
+// Initialize performs startup checks and corrections on the database state.
+func (a *App) Initialize(ctx context.Context) error {
+	// Correct episodes stuck in QUEUED state that are already downloaded
+	if err := a.episodes.CorrectQueuedStates(ctx); err != nil {
+		return fmt.Errorf("correct queued states: %w", err)
+	}
+	return nil
+}
+
 func (a *App) Execute(ctx context.Context, input string) (CommandResult, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
@@ -201,15 +213,15 @@ func (a *App) LookupPodcast(ctx context.Context, id string) (itunes.Podcast, err
 }
 
 func (a *App) registerCommands() {
-	a.registerCommand("help", "help [command]", "Show information about available commands", a.helpCommand, "?")
 	a.registerCommand("config", "config [show]", "View or edit application configuration", a.configCommand)
 	a.registerCommand("exit", "exit", "Exit the application", a.exitCommand, "quit")
 	a.registerCommand("search", "search <query>", "Search for podcasts via the iTunes API", a.searchCommand, "s")
 	a.registerCommand("list", "list subscriptions [filter]", "List all podcast subscriptions (optionally filtered)", a.listCommand, "ls")
 	a.registerCommand("episodes", "episodes", "View recent episodes across subscriptions", a.episodesCommand, "e", "le")
 	a.registerCommand("queue", "queue [episode_id]", "View download queue status or queue an episode", a.queueCommand, "q")
+	a.registerCommand("downloads", "downloads", "View all downloaded episodes", a.downloadsCommand, "d")
 	a.registerCommand("import", "import <file>", "Import subscriptions from an OPML file", a.importCommand)
-	// Register download and ignore commands (not in help menu, but available for shortcuts)
+	// Register download and ignore commands (available for shortcuts)
 	a.commands["download"] = &command{usage: "download <episode_id>", summary: "Download an episode immediately", handler: a.downloadCommand}
 	a.commands["ignore"] = &command{usage: "ignore <episode_id>", summary: "Toggle the ignored state for an episode", handler: a.ignoreCommand}
 	a.registerCommand("export", "export <file>", "Export subscriptions to an OPML file", a.exportCommand)
@@ -221,25 +233,6 @@ func (a *App) registerCommand(name, usage, summary string, handler commandHandle
 	for _, alias := range names {
 		a.commands[alias] = cmd
 	}
-	a.helpList = append(a.helpList, cmd)
-}
-
-func (a *App) helpCommand(_ context.Context, args []string) (CommandResult, error) {
-	if len(args) == 0 {
-		builder := strings.Builder{}
-		builder.WriteString("Available commands:\n")
-		for _, cmd := range a.helpList {
-			builder.WriteString(fmt.Sprintf("  %s\t%s\n", cmd.usage, cmd.summary))
-		}
-		return CommandResult{Message: builder.String()}, nil
-	}
-
-	name := strings.ToLower(args[0])
-	cmd, ok := a.commands[name]
-	if !ok {
-		return CommandResult{Message: fmt.Sprintf("unknown command: %s", name)}, nil
-	}
-	return CommandResult{Message: fmt.Sprintf("%s\n%s", cmd.usage, cmd.summary)}, nil
 }
 
 func (a *App) configCommand(ctx context.Context, args []string) (CommandResult, error) {
@@ -497,11 +490,38 @@ func (a *App) queueCommand(ctx context.Context, args []string) (CommandResult, e
 	if err != nil {
 		return CommandResult{}, err
 	}
-	if len(queuedEpisodes) == 0 {
-		return CommandResult{Message: "Download queue is empty."}, nil
+
+	// Always return QueuedEpisodeResults, even if empty, so the queue view is activated
+	return CommandResult{QueuedEpisodeResults: queuedEpisodes}, nil
+}
+
+func (a *App) downloadsCommand(ctx context.Context, args []string) (CommandResult, error) {
+	// List all downloaded episodes (DOWNLOADED or DELETED state)
+	if len(args) != 0 {
+		return CommandResult{Message: "Usage: downloads"}, nil
 	}
 
-	return CommandResult{QueuedEpisodeResults: queuedEpisodes}, nil
+	// Check for deleted files and update states
+	if err := a.episodes.CheckDeletedFiles(ctx); err != nil {
+		return CommandResult{}, err
+	}
+
+	downloadedEpisodes, err := a.episodes.ListDownloaded(ctx)
+	if err != nil {
+		return CommandResult{}, err
+	}
+
+	// Find dangling files (files in download directory not tracked in database)
+	danglingFiles, err := a.episodes.FindDanglingFiles(ctx, a.config.DownloadRoot)
+	if err != nil {
+		return CommandResult{}, err
+	}
+
+	// Always return DownloadedEpisodeResults and DanglingFiles, even if empty, so the downloads view is activated
+	return CommandResult{
+		DownloadedEpisodeResults: downloadedEpisodes,
+		DanglingFiles:            danglingFiles,
+	}, nil
 }
 
 func (a *App) downloadCommand(ctx context.Context, args []string) (CommandResult, error) {
@@ -612,4 +632,14 @@ func (a *App) ImportOPML(ctx context.Context, filePath string) (OPMLImportResult
 
 func (a *App) EpisodeDetails(ctx context.Context, episodeID string) (EpisodeDetail, error) {
 	return a.episodes.EpisodeDetails(ctx, episodeID)
+}
+
+// CountQueued returns the count of episodes in QUEUED state.
+func (a *App) CountQueued(ctx context.Context) (int, error) {
+	return a.episodes.CountQueued(ctx)
+}
+
+// CountDownloaded returns the count of episodes in DOWNLOADED or DELETED state.
+func (a *App) CountDownloaded(ctx context.Context) (int, error) {
+	return a.episodes.CountDownloaded(ctx)
 }

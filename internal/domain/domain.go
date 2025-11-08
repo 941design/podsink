@@ -8,6 +8,7 @@ const (
 	EpisodeStateIgnored    = "IGNORED"
 	EpisodeStateQueued     = "QUEUED"
 	EpisodeStateDownloaded = "DOWNLOADED"
+	EpisodeStateDeleted    = "DELETED"
 )
 
 type SubscriptionSummary struct {
@@ -94,4 +95,9 @@ type SubscriptionData struct {
 type PodcastExport struct {
 	Title   string
 	FeedURL string
+}
+
+type DanglingFile struct {
+	Path      string
+	SizeBytes int64
 }

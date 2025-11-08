@@ -23,6 +23,10 @@ func (s *Service) ListQueued(ctx context.Context) ([]domain.QueuedEpisodeResult,
 	return s.store.ListQueuedEpisodes(ctx)
 }
 
+func (s *Service) ListDownloaded(ctx context.Context) ([]domain.EpisodeResult, error) {
+	return s.store.ListDownloadedEpisodes(ctx)
+}
+
 func (s *Service) MarkAllSeen(ctx context.Context) error {
 	return s.store.MarkAllEpisodesSeen(ctx)
 }
@@ -53,4 +57,24 @@ func (s *Service) EpisodeDetails(ctx context.Context, episodeID string) (domain.
 
 func (s *Service) UpdateEpisodeState(ctx context.Context, episodeID, state string) error {
 	return s.store.UpdateEpisodeState(ctx, episodeID, state)
+}
+
+func (s *Service) CheckDeletedFiles(ctx context.Context) error {
+	return s.store.CheckAndUpdateDeletedFiles(ctx)
+}
+
+func (s *Service) CorrectQueuedStates(ctx context.Context) error {
+	return s.store.CorrectQueuedStates(ctx)
+}
+
+func (s *Service) CountQueued(ctx context.Context) (int, error) {
+	return s.store.CountQueuedEpisodes(ctx)
+}
+
+func (s *Service) CountDownloaded(ctx context.Context) (int, error) {
+	return s.store.CountDownloadedEpisodes(ctx)
+}
+
+func (s *Service) FindDanglingFiles(ctx context.Context, downloadRoot string) ([]domain.DanglingFile, error) {
+	return s.store.FindDanglingFiles(ctx, downloadRoot)
 }

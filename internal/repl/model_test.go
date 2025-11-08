@@ -364,3 +364,73 @@ func TestEpisodeDetailsScrollKeys(t *testing.T) {
 		t.Fatalf("expected home to reset scroll, got %d", m.episodes.details.scroll)
 	}
 }
+
+// TestQueueNavigationFromMainMenu verifies that navigating to queue from main menu doesn't crash
+func TestQueueNavigationFromMainMenu(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	// Create a model with command menu active (initial state)
+	m := newModel(ctx, a)
+
+	// Simulate pressing 'q' to navigate to queue
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(model)
+
+	// The queue should be active now
+	if !m.queue.active {
+		t.Error("Expected queue to be active after pressing 'q' from main menu")
+	}
+
+	// Command menu should be deactivated
+	if m.commandMenu.active {
+		t.Error("Expected command menu to be deactivated when queue is active")
+	}
+
+	// Should be able to render without crashing
+	view := m.View()
+	if !strings.Contains(view, "Download Queue") {
+		t.Errorf("Expected queue view to be rendered, got: %s", view)
+	}
+
+	// Test navigation back to main menu with 'x'
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	m = updated.(model)
+
+	if m.queue.active {
+		t.Error("Expected queue to be deactivated after pressing 'x'")
+	}
+
+	if !m.commandMenu.active {
+		t.Error("Expected to return to main menu after pressing 'x' from queue")
+	}
+}
+
+// TestConfigNavigationFromMainMenu verifies that navigating to config from main menu doesn't crash
+func TestConfigNavigationFromMainMenu(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+
+	// Create a model with command menu active (initial state)
+	m := newModel(ctx, a)
+
+	// Simulate pressing 'c' to navigate to config
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = updated.(model)
+
+	// When config returns a message (not a special view), we should return to the menu
+	if !m.commandMenu.active {
+		t.Error("Expected to return to command menu when config returns a message")
+	}
+
+	// Should be able to render without crashing
+	view := m.View()
+	if view == "" {
+		t.Error("Expected non-empty view after navigating to config")
+	}
+
+	// Should show the menu
+	if !strings.Contains(view, "Podsink - Podcast Manager") {
+		t.Errorf("Expected to see main menu, got: %s", view)
+	}
+}

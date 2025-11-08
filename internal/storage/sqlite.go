@@ -115,5 +115,23 @@ func applyMigrations(db *sql.DB) error {
 		}
 	}
 
+	// Migration 2: Add claimed_at column to downloads table if it doesn't exist
+	var claimedColumnExists bool
+	err = db.QueryRow(`
+		SELECT COUNT(*) > 0
+		FROM pragma_table_info('downloads')
+		WHERE name = 'claimed_at'
+	`).Scan(&claimedColumnExists)
+	if err != nil {
+		return fmt.Errorf("check claimed_at column: %w", err)
+	}
+
+	if !claimedColumnExists {
+		_, err := db.Exec(`ALTER TABLE downloads ADD COLUMN claimed_at TIMESTAMP`)
+		if err != nil {
+			return fmt.Errorf("add claimed_at column: %w", err)
+		}
+	}
+
 	return nil
 }

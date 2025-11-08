@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -250,6 +252,115 @@ ORDER BY d.priority DESC, d.enqueued_at`, domain.EpisodeStateQueued)
 	return results, nil
 }
 
+// ListDownloadedEpisodes returns all episodes that have been downloaded (DOWNLOADED or DELETED state).
+func (s *Store) ListDownloadedEpisodes(ctx context.Context) ([]domain.EpisodeResult, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.title, e.state, e.published_at, e.size_bytes, p.id, p.title
+FROM episodes e
+JOIN podcasts p ON p.id = e.podcast_id
+WHERE e.state IN (?, ?)
+ORDER BY
+    CASE WHEN e.published_at IS NULL OR e.published_at = '' THEN 1 ELSE 0 END,
+    e.published_at DESC,
+    LOWER(p.title),
+    LOWER(e.title)`, domain.EpisodeStateDownloaded, domain.EpisodeStateDeleted)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := make([]domain.EpisodeResult, 0, 128)
+	for rows.Next() {
+		var episode domain.EpisodeRow
+		var published sql.NullString
+		var podcastID, podcastTitle string
+		if err := rows.Scan(&episode.ID, &episode.Title, &episode.State, &published, &episode.SizeBytes, &podcastID, &podcastTitle); err != nil {
+			return nil, err
+		}
+		if published.Valid {
+			if parsed, err := time.Parse(time.RFC3339Nano, published.String); err == nil {
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
+			} else if parsed, err := time.Parse(time.RFC3339, published.String); err == nil {
+				episode.PublishedAt = parsed
+				episode.HasPublish = true
+			}
+		}
+		results = append(results, domain.EpisodeResult{
+			Episode:      episode,
+			PodcastID:    podcastID,
+			PodcastTitle: podcastTitle,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// CountQueuedEpisodes returns the count of episodes in QUEUED state.
+func (s *Store) CountQueuedEpisodes(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM episodes WHERE state = ?`, domain.EpisodeStateQueued).Scan(&count)
+	return count, err
+}
+
+// CountDownloadedEpisodes returns the count of episodes in DOWNLOADED or DELETED state.
+func (s *Store) CountDownloadedEpisodes(ctx context.Context) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM episodes WHERE state IN (?, ?)`, domain.EpisodeStateDownloaded, domain.EpisodeStateDeleted).Scan(&count)
+	return count, err
+}
+
+// FindDanglingFiles scans the download directory and returns files that are not tracked in the database.
+func (s *Store) FindDanglingFiles(ctx context.Context, downloadRoot string) ([]domain.DanglingFile, error) {
+	if downloadRoot == "" {
+		return nil, nil
+	}
+
+	// Get all file paths from the database
+	rows, err := s.db.QueryContext(ctx, `SELECT file_path FROM episodes WHERE file_path IS NOT NULL AND file_path != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	knownFiles := make(map[string]bool)
+	for rows.Next() {
+		var filePath string
+		if err := rows.Scan(&filePath); err != nil {
+			return nil, err
+		}
+		knownFiles[filePath] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Scan download directory for all files
+	var danglingFiles []domain.DanglingFile
+	err = filepath.Walk(downloadRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip files we can't access
+		}
+		if info.IsDir() {
+			return nil // Skip directories
+		}
+		// Check if this file is in the database
+		if !knownFiles[path] {
+			danglingFiles = append(danglingFiles, domain.DanglingFile{
+				Path:      path,
+				SizeBytes: info.Size(),
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return danglingFiles, nil
+}
+
 func (s *Store) MarkAllEpisodesSeen(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE state = ?", domain.EpisodeStateSeen, domain.EpisodeStateNew)
 	return err
@@ -289,6 +400,75 @@ WHERE e.id = ?`, episodeID).
 func (s *Store) UpdateEpisodeState(ctx context.Context, episodeID, state string) error {
 	_, err := s.db.ExecContext(ctx, "UPDATE episodes SET state = ? WHERE id = ?", state, episodeID)
 	return err
+}
+
+// CheckAndUpdateDeletedFiles checks all downloaded episodes and marks those with
+// missing files as DELETED.
+func (s *Store) CheckAndUpdateDeletedFiles(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, file_path FROM episodes WHERE state = ? AND file_path IS NOT NULL AND file_path != ''`, domain.EpisodeStateDownloaded)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var episodesToUpdate []string
+	for rows.Next() {
+		var id, filePath string
+		if err := rows.Scan(&id, &filePath); err != nil {
+			return err
+		}
+		// Check if file exists
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			episodesToUpdate = append(episodesToUpdate, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Update all episodes with missing files
+	for _, id := range episodesToUpdate {
+		if err := s.UpdateEpisodeState(ctx, id, domain.EpisodeStateDeleted); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// CorrectQueuedStates checks all queued episodes and updates their state to DOWNLOADED
+// if the file already exists on the filesystem. This fixes episodes stuck in QUEUED state.
+func (s *Store) CorrectQueuedStates(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, file_path FROM episodes WHERE state = ? AND file_path IS NOT NULL AND file_path != ''`, domain.EpisodeStateQueued)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var episodesToUpdate []string
+	for rows.Next() {
+		var id, filePath string
+		if err := rows.Scan(&id, &filePath); err != nil {
+			return err
+		}
+		// Check if file exists
+		if _, err := os.Stat(filePath); err == nil {
+			// File exists, should be marked as DOWNLOADED
+			episodesToUpdate = append(episodesToUpdate, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Update all episodes with existing files
+	for _, id := range episodesToUpdate {
+		if err := s.UpdateEpisodeState(ctx, id, domain.EpisodeStateDownloaded); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Store) RemoveFromQueue(ctx context.Context, episodeID string) error {
@@ -349,6 +529,7 @@ func (s *Store) PersistDownloadResult(ctx context.Context, episodeID, finalPath,
 		if _, err := tx.ExecContext(ctx, "UPDATE episodes SET state = ?, downloaded_at = ?, file_path = ?, hash = ?, retry_count = 0 WHERE id = ?", domain.EpisodeStateDownloaded, now, finalPath, hash, episodeID); err != nil {
 			return err
 		}
+		// Remove episode from downloads table since it's now successfully downloaded
 		if _, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID); err != nil {
 			return err
 		}
@@ -380,7 +561,8 @@ func (s *Store) ClaimNextDownload(ctx context.Context) (string, error) {
 		}()
 
 		episodeID = ""
-		err = tx.QueryRowContext(ctx, `SELECT episode_id FROM downloads ORDER BY priority DESC, enqueued_at LIMIT 1`).Scan(&episodeID)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		err = tx.QueryRowContext(ctx, `SELECT episode_id FROM downloads WHERE claimed_at IS NULL ORDER BY priority DESC, enqueued_at LIMIT 1`).Scan(&episodeID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNoDownloadTask
@@ -388,7 +570,7 @@ func (s *Store) ClaimNextDownload(ctx context.Context) (string, error) {
 			return err
 		}
 
-		res, err := tx.ExecContext(ctx, "DELETE FROM downloads WHERE episode_id = ?", episodeID)
+		res, err := tx.ExecContext(ctx, "UPDATE downloads SET claimed_at = ? WHERE episode_id = ? AND claimed_at IS NULL", now, episodeID)
 		if err != nil {
 			return err
 		}

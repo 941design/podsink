@@ -28,21 +28,6 @@ func (r *recordingSleeper) Sleep(_ context.Context, d time.Duration) error {
 	return nil
 }
 
-func TestHelpListsKeyCommands(t *testing.T) {
-	app := newTestApp(t)
-
-	result, err := app.Execute(context.Background(), "help")
-	if err != nil {
-		t.Fatalf("Execute(help) error = %v", err)
-	}
-
-	for _, expected := range []string{"search <query>", "list subscriptions", "config [show]"} {
-		if !strings.Contains(result.Message, expected) {
-			t.Errorf("help output missing %q\n%s", expected, result.Message)
-		}
-	}
-}
-
 func TestExportOPMLRequiresSubscriptions(t *testing.T) {
 	app := newTestApp(t)
 

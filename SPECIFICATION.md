@@ -1,9 +1,9 @@
 # Podsink — Production-Ready CLI Podcast Downloader
 
 ## Purpose & Scope
-**Podsink** is a production-ready command-line tool for discovering, subscribing to, and downloading podcast episodes.  
-It offers a REPL-style interactive interface similar to *psql* or *inquirer.js*, with scrollable lists for search results and episodes.  
-It supports persistence of subscriptions and episodes via SQLite, configuration in the user’s home directory, and explicit on-demand downloading to an external storage location (e.g., SD card).
+**Podsink** is a production-ready command-line tool for discovering, subscribing to, and downloading podcast episodes.
+It offers a menu-driven interactive interface with keyboard navigation, featuring scrollable lists for search results and episodes.
+It supports persistence of subscriptions and episodes via SQLite, configuration in the user's home directory, and explicit on-demand downloading to an external storage location (e.g., SD card).
 
 ### Primary Users
 - Technically inclined podcast listeners preferring a terminal interface.
@@ -15,9 +15,10 @@ It supports persistence of subscriptions and episodes via SQLite, configuration 
 - Persisted state without automatic sync to filesystem.
 
 ### Non-Goals
-- Full-screen TUI dashboard.
+- Full-screen TUI dashboard (menu-based navigation is sufficient).
 - Automatic syncing or caching.
 - Cloud integration or telemetry.
+- REPL command prompt (menu-based interface replaces traditional command line).
 
 ### Target Release Type
 Production-ready v1.0.
@@ -37,18 +38,28 @@ Production-ready v1.0.
 8. **Onboarding** on first run (prompt for target directory).
 9. **Concurrent Downloads** with configurable concurrency and retry logic.
 
-### REPL Interface
-- Default Prompt: `podsink>`
-- Autocomplete and inline help.
-- Commands:
-  - `search` - enters search mode (prompt changes to `search>`)
-  - `list subscriptions`
-  - `episodes` (aliases: `e`, `le`)
-  - `queue [episode_id]` - without args: view download queue; with arg: queue an episode
-  - `download <episode_id>` - download episode immediately (available via command line, not in main menu)
-  - `ignore <episode_id>` - toggle ignored state (available via command line, not in main menu)
-  - `config`
-  - `exit` / `quit`
+### Menu Interface
+The application uses a navigable main menu as the primary interface:
+- **Main Menu Options:**
+  - **Search** `[s]` - Search for podcasts and subscribe/unsubscribe
+  - **Podcasts** `[p]` - List all subscriptions (alias for `list subscriptions`)
+  - **Episodes** `[e]` - View and manage recent episodes
+  - **Queue** `[q]` - View download queue status (displays count of queued episodes when non-zero)
+  - **Downloads** `[d]` - View all downloaded episodes (displays count of downloaded episodes when non-zero)
+  - **Config** `[c]` - View or edit configuration
+  - **Exit** `[x]` - Exit the application
+
+- **Navigation:**
+  - Use ↑↓ or j/k to navigate menu items
+  - Press Enter to select the highlighted option
+  - Use keyboard shortcuts (s/p/e/q/d/c/x) to jump directly to an option
+  - Press ESC or x from any submenu to return to main menu
+  - Counts for Queue and Downloads are automatically updated when returning to the main menu
+
+- **Search Mode:**
+  - When search is selected, a text input prompt appears: `search>`
+  - Type query and press Enter to execute search
+  - Press ESC to cancel and return to main menu
 
 ### Episode State Machine
 | State | Description | Transitions |
@@ -57,7 +68,8 @@ Production-ready v1.0.
 | `SEEN` | Visible in UI, no user action yet | ↔ `IGNORED`, → `QUEUED` |
 | `IGNORED` | User suppressed | ↔ `SEEN` |
 | `QUEUED` | Selected for download | → `DOWNLOADED` |
-| `DOWNLOADED` | Successfully downloaded | → `QUEUED` (re-download) |
+| `DOWNLOADED` | Successfully downloaded | → `QUEUED` (re-download), → `DELETED` (file removed) |
+| `DELETED` | Downloaded but file no longer exists | → `QUEUED` (re-download) |
 
 Failures are logged but do not alter persistent state.
 
@@ -101,8 +113,8 @@ Failures are logged but do not alter persistent state.
 - **OPML import/export:** `~/.podsink/subscriptions.opml`
 
 ### Command-line Options
-- `--import-opml <path>` imports subscriptions from an OPML file and exits before starting the REPL.
-- `--export-opml <path>` exports current subscriptions to an OPML file and exits before starting the REPL.
+- `--import-opml <path>` imports subscriptions from an OPML file and exits before starting the menu interface.
+- `--export-opml <path>` exports current subscriptions to an OPML file and exits before starting the menu interface.
 
 ### Config Keys
 | Key | Default | Description |
@@ -134,10 +146,12 @@ Failures are logged but do not alter persistent state.
 1. Check for config file; if missing, prompt user for download directory (autocomplete paths).
 2. Save YAML config and initialize SQLite DB.
 
-### REPL Flow
-- All commands executed interactively in REPL (no full-screen TUI).
-- Scrollable list views for results and episodes within REPL context.
-- Keyboard shortcuts: ↑↓ navigation, space toggle, Enter select, `d` download, `i` ignore.
+### Menu Navigation Flow
+- The application starts with the main menu displaying all available options.
+- Users navigate using ↑↓/jk keys or keyboard shortcuts (s/p/e/q/c/x).
+- Pressing Enter or a shortcut key activates the selected option.
+- All submenus (search results, episodes, queue, etc.) can be exited with ESC or x to return to the main menu.
+- No traditional command prompt - all interactions are menu-driven with dedicated input modes for search queries.
 
 ### Search & Subscribe Flow
 The `search` command (or `[s]` shortcut from the main menu) enters **search input mode**, where the prompt changes to `search>`. The user types their search query and presses Enter to execute the search. Press `Esc` to exit search mode without searching.
@@ -191,6 +205,7 @@ After executing a search or running `list subscriptions`, an interactive list of
 ### Startup
 - Prompts for target dir if config missing.
 - Creates config and DB automatically.
+- Auto-corrects episodes stuck in QUEUED state if their files already exist on disk, updating them to DOWNLOADED.
 
 ### Search
 - `search` command (or `[s]` shortcut) enters search input mode with `search>` prompt.
@@ -220,17 +235,21 @@ After executing a search or running `list subscriptions`, an interactive list of
 - The list view supports the following interactive keybindings:
   - `Enter`: Opens a detailed episode view with HTML-formatted descriptions converted to plain text. The description initially shows up to `max_episode_description_lines` (default: 12) with ↑↓/j/k scroll support for longer content; `Esc`/`x` returns to the list.
   - `[i]`: Ignore/unignore the selected episode (toggles between `IGNORED` and `SEEN` states).
-  - `[a]`: Toggle between showing all episodes or hiding ignored episodes.
-  - `[f]`: Fetch/queue the selected episode for download (transitions to `QUEUED` state).
+  - `[A]`: Filter to show all episodes.
+  - `[I]`: Filter to show only ignored episodes.
+  - `[D]`: Filter to show only downloaded episodes.
+  - `[d]`: Download/queue the selected episode for download (transitions to `QUEUED` state).
   - `↑↓` or `j/k`: Navigate through the episode list.
   - `x`, `Esc`, or `q`: Exit episode mode and return to the main menu.
-- By default, ignored episodes are hidden from the list. Press `[a]` to toggle showing all episodes.
+- By default, ignored episodes are hidden from the list. Press `[A]` to show all, `[I]` for ignored only, or `[D]` for downloaded only.
 - `queue` transitions episode to `QUEUED`.
 - Successful download → `DOWNLOADED`.
 - Ignore/unignore toggles `IGNORED`/`SEEN`.
 
 ### Queue View
-- `queue` without arguments displays all currently queued episodes in an interactive list view.
+- `queue` without arguments displays all currently queued and downloaded episodes in an interactive list view.
+- The view shows both episodes that are waiting to download (state: `QUEUED`) and episodes that have been downloaded (state: `DOWNLOADED`).
+- Episodes remain in the queue after downloading until explicitly removed or ignored.
 - The view shows:
   - Enqueued date in `YYYY-MM-DD` format
   - Podcast name (abbreviated to `podcast_name_max_length`)
@@ -241,9 +260,25 @@ After executing a search or running `list subscriptions`, an interactive list of
   - `x` or `Esc`: Return to main menu
 - If the queue is empty, displays "Download queue is empty." message instead of the interactive view.
 
+### Downloads View
+- `downloads` displays all episodes that have been downloaded (state: `DOWNLOADED` or `DELETED`) in an interactive list view.
+- The view automatically checks for deleted files on the filesystem and updates episode states from `DOWNLOADED` to `DELETED` accordingly.
+- Episodes marked as `DELETED` are displayed with a `[DELETED]` indicator, showing that the file was downloaded but is no longer present on the filesystem.
+- The view shows:
+  - Published date in `YYYY-MM-DD` format
+  - Podcast name (abbreviated to `podcast_name_max_length`)
+  - Episode title (abbreviated to `episode_name_max_length`)
+  - File size in MB
+  - State indicator: `[DELETED]` for episodes with missing files
+- Additionally displays a "Dangling Files" section showing files in the download directory that are not tracked in the database.
+- Navigation:
+  - `↑↓` or `j/k`: Navigate through the downloads list with scrolling support for long lists
+  - `x` or `Esc`: Return to main menu
+- If there are no downloads, displays "Downloaded Episodes - Empty" message.
+
 ### OPML Import/Export
-- `podsink --export-opml <path>` writes subscriptions to the specified file and exits before launching the REPL.
-- `podsink --import-opml <path>` imports subscriptions, reporting counts of imported, skipped, and failed entries, then exits before launching the REPL.
+- `podsink --export-opml <path>` writes subscriptions to the specified file and exits before launching the menu interface.
+- `podsink --import-opml <path>` imports subscriptions, reporting counts of imported, skipped, and failed entries, then exits before launching the menu interface.
 - Passing both flags together returns an error and a non-zero exit code without performing any action.
 
 ### Downloads
@@ -256,7 +291,7 @@ After executing a search or running `list subscriptions`, an interactive list of
 
 ### Logging & Errors
 - Logs include command name, success/failure, duration.
-- Errors shown clearly in REPL; no panics or crashes.
+- Errors are logged; application handles failures gracefully without panics or crashes.
 
 ---
 
@@ -264,11 +299,11 @@ After executing a search or running `list subscriptions`, an interactive list of
 
 | Milestone | Focus | Deliverables |
 |------------|--------|--------------|
-| **M1 – Core CLI & Config** | Implement REPL shell, YAML config bootstrap/edit, SQLite setup. | `config`, `init`, `exit` commands functional. |
-| **M2 – Discovery & Subscriptions** | Integrate iTunes search API, parse RSS feeds, interactive subscribe/unsubscribe flows. | `search`, `list subscriptions`. |
-| **M3 – Episode Management** | Implement episode listing, state transitions, ignore logic. | `episodes`, `ignore`, state persistence. |
-| **M4 – Downloader** | Add concurrent resumable downloads, retry/backoff, overwrite logic. | `queue`, `download`, logging. |
-| **M5 – Polish & Production** | Autocomplete, help, packaging, release pipeline. | GitHub releases, docs, final binaries. |
+| **M1 – Core CLI & Config** | Implement menu interface, YAML config bootstrap/edit, SQLite setup. | Main menu, config editor, exit functionality. |
+| **M2 – Discovery & Subscriptions** | Integrate iTunes search API, parse RSS feeds, interactive subscribe/unsubscribe flows. | Search menu option, podcast listing. |
+| **M3 – Episode Management** | Implement episode listing, state transitions, ignore logic. | Episodes menu option, state management. |
+| **M4 – Downloader** | Add concurrent resumable downloads, retry/backoff, overwrite logic. | Queue menu option, download manager. |
+| **M5 – Polish & Production** | Menu refinements, keyboard shortcuts, packaging, release pipeline. | GitHub releases, docs, final binaries. |
 
 ---
 

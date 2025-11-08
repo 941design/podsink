@@ -31,12 +31,12 @@ type detailView struct {
 }
 
 type episodeView struct {
-	active          bool
-	results         []app.EpisodeResult
-	cursor          int
-	scroll          int
-	details         episodeDetailView
-	showAllEpisodes bool
+	active     bool
+	results    []app.EpisodeResult
+	cursor     int
+	scroll     int
+	details    episodeDetailView
+	filterMode string // "all", "ignored", "downloaded", or "" (default: not ignored)
 }
 
 type episodeDetailView struct {
@@ -50,6 +50,14 @@ type queueView struct {
 	active  bool
 	results []app.QueuedEpisodeResult
 	cursor  int
+}
+
+type downloadsView struct {
+	active        bool
+	results       []app.EpisodeResult
+	danglingFiles []app.DanglingFile
+	cursor        int
+	scroll        int
 }
 
 type commandMenuItem struct {
@@ -66,22 +74,22 @@ type commandMenuView struct {
 }
 
 type model struct {
-	ctx           context.Context
-	app           *app.App
-	input         textinput.Model
-	history       []string
-	messages      []string
-	quitting      bool
-	completions   []string
-	completionIdx int
-	theme         theme.Theme
-	width         int
+	ctx      context.Context
+	app      *app.App
+	input    textinput.Model
+	quitting bool
+	theme    theme.Theme
+	width    int
 
-	searchInputMode bool // When true, prompt changes to "search> " and input is treated as search query
+	searchInputMode bool // When true, input is shown for entering search query
 	commandMenu     commandMenuView
 	search          searchView
 	episodes        episodeView
 	queue           queueView
+	downloads       downloadsView
+
+	queueCount     int
+	downloadsCount int
 
 	longDescCache map[string]string
 }
@@ -90,31 +98,28 @@ func newModel(ctx context.Context, application *app.App) model {
 	cfg := application.Config()
 	th := theme.ForName(cfg.ColorTheme)
 	ti := textinput.New()
-	ti.Placeholder = "help"
+	ti.Placeholder = "Enter podcast search query..."
 	ti.Blur() // Start with menu, not input
-	ti.Prompt = "podsink> "
+	ti.Prompt = "search> "
 	ti.CharLimit = 512
 	ti.Width = 80
 
-	// Build command menu items (excluding help, import, export)
+	// Build command menu items
 	commandItems := []commandMenuItem{
 		{name: "search", usage: "search", description: "Search for podcasts via the iTunes API", shorthand: "[s]"},
 		{name: "list", usage: "podcasts", description: "List all podcast subscriptions", shorthand: "[p]"},
 		{name: "episodes", usage: "episodes", description: "View recent episodes across subscriptions", shorthand: "[e]"},
 		{name: "queue", usage: "queue", description: "View download queue status", shorthand: "[q]"},
+		{name: "downloads", usage: "downloads", description: "View all downloaded episodes", shorthand: "[d]"},
 		{name: "config", usage: "config [show]", description: "View or edit application configuration", shorthand: "[c]"},
 		{name: "exit", usage: "exit", description: "Exit the application", shorthand: "[x]"},
 	}
 
-	return model{
-		ctx:     ctx,
-		app:     application,
-		input:   ti,
-		history: make([]string, 0, 32),
-		theme:   th,
-		messages: []string{
-			th.Message.Render("Podsink CLI ready. Type 'help' for assistance."),
-		},
+	m := model{
+		ctx:   ctx,
+		app:   application,
+		input: ti,
+		theme: th,
 		commandMenu: commandMenuView{
 			active: true,
 			items:  commandItems,
@@ -122,6 +127,11 @@ func newModel(ctx context.Context, application *app.App) model {
 		},
 		longDescCache: make(map[string]string),
 	}
+
+	// Fetch initial counts
+	m.refreshCounts()
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
@@ -182,7 +192,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Execute "list subscriptions" directly
 						result, err := m.app.Execute(m.ctx, "list subscriptions")
 						if err != nil {
-							m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+							// Error: return to menu
 							return m, nil
 						}
 						return m.handleCommandResult(result)
@@ -190,7 +200,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Execute the command directly
 						result, err := m.app.Execute(m.ctx, selectedItem.name)
 						if err != nil {
-							m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+							// Error: return to menu
 							return m, nil
 						}
 						return m.handleCommandResult(result)
@@ -213,7 +223,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				result, err := m.app.Execute(m.ctx, "list subscriptions")
 				if err != nil {
-					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					// Error: return to menu
+					m.commandMenu.active = true
+					m.input.Blur()
 					return m, nil
 				}
 				return m.handleCommandResult(result)
@@ -223,7 +235,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				result, err := m.app.Execute(m.ctx, "episodes")
 				if err != nil {
-					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					// Error: return to menu
+					m.commandMenu.active = true
+					m.input.Blur()
 					return m, nil
 				}
 				return m.handleCommandResult(result)
@@ -233,7 +247,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				result, err := m.app.Execute(m.ctx, "config")
 				if err != nil {
-					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					// Error: return to menu
+					m.commandMenu.active = true
+					m.input.Blur()
 					return m, nil
 				}
 				return m.handleCommandResult(result)
@@ -243,7 +259,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Focus()
 				result, err := m.app.Execute(m.ctx, "queue")
 				if err != nil {
-					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					// Error: return to menu
+					m.commandMenu.active = true
+					m.input.Blur()
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "d":
+				// Shortcut for downloads
+				m.commandMenu.active = false
+				m.input.Focus()
+				result, err := m.app.Execute(m.ctx, "downloads")
+				if err != nil {
+					// Error: return to menu
+					m.commandMenu.active = true
+					m.input.Blur()
 					return m, nil
 				}
 				return m.handleCommandResult(result)
@@ -327,6 +357,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.search.hint = ""
 				m.search.context = ""
 				m.search.details = detailView{}
+				m.refreshCounts()
 				m.commandMenu.active = true
 				m.input.Blur()
 				return m, nil
@@ -384,6 +415,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.episodes.details.active = false
 				m.episodes.cursor = 0
 				m.episodes.scroll = 0
+				m.refreshCounts()
 				m.commandMenu.active = true
 				m.input.Blur()
 				return m, nil
@@ -392,7 +424,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selected := m.episodes.results[m.episodes.cursor]
 					detail, err := m.app.EpisodeDetails(m.ctx, selected.Episode.ID)
 					if err != nil {
-						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						// Error: stay in episode list
 						return m, nil
 					}
 					m.enterEpisodeDetails(detail)
@@ -430,49 +462,63 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Ignore/unignore the selected episode
 				if m.episodes.cursor < len(m.episodes.results) {
 					selected := m.episodes.results[m.episodes.cursor]
-					result, err := m.app.Execute(m.ctx, "ignore "+selected.Episode.ID)
+					_, err := m.app.Execute(m.ctx, "ignore "+selected.Episode.ID)
 					if err != nil {
-						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						// Error: stay in episode list
 						return m, nil
 					}
-					if result.Message != "" {
-						m.messages = append(m.messages, result.Message)
-					}
 					// Refresh the episode list
-					result, err = m.app.Execute(m.ctx, "episodes")
+					result, err := m.app.Execute(m.ctx, "episodes")
 					if err != nil {
-						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						// Error: stay in episode list
 						return m, nil
 					}
 					return m.handleCommandResult(result)
 				}
 				return m, nil
 			case "a":
-				// Toggle showing all episodes vs hiding ignored ones
-				m.episodes.showAllEpisodes = !m.episodes.showAllEpisodes
+				// Show all episodes
+				m.episodes.filterMode = "all"
 				// Refresh the episode list
 				result, err := m.app.Execute(m.ctx, "episodes")
 				if err != nil {
-					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					// Error: stay in episode list
 					return m, nil
 				}
 				return m.handleCommandResult(result)
-			case "f":
-				// Fetch/queue the selected episode for download
+			case "shift+i":
+				// Show only ignored episodes
+				m.episodes.filterMode = "ignored"
+				// Refresh the episode list
+				result, err := m.app.Execute(m.ctx, "episodes")
+				if err != nil {
+					// Error: stay in episode list
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "shift+d":
+				// Show only downloaded episodes
+				m.episodes.filterMode = "downloaded"
+				// Refresh the episode list
+				result, err := m.app.Execute(m.ctx, "episodes")
+				if err != nil {
+					// Error: stay in episode list
+					return m, nil
+				}
+				return m.handleCommandResult(result)
+			case "d":
+				// Download/queue the selected episode for download
 				if m.episodes.cursor < len(m.episodes.results) {
 					selected := m.episodes.results[m.episodes.cursor]
-					result, err := m.app.Execute(m.ctx, "queue "+selected.Episode.ID)
+					_, err := m.app.Execute(m.ctx, "queue "+selected.Episode.ID)
 					if err != nil {
-						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						// Error: stay in episode list
 						return m, nil
 					}
-					if result.Message != "" {
-						m.messages = append(m.messages, result.Message)
-					}
 					// Refresh the episode list
-					result, err = m.app.Execute(m.ctx, "episodes")
+					result, err := m.app.Execute(m.ctx, "episodes")
 					if err != nil {
-						m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+						// Error: stay in episode list
 						return m, nil
 					}
 					return m.handleCommandResult(result)
@@ -492,6 +538,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.queue.active = false
 				m.queue.results = nil
 				m.queue.cursor = 0
+				m.refreshCounts()
 				m.commandMenu.active = true
 				m.input.Blur()
 				return m, nil
@@ -509,6 +556,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle downloads mode navigation
+		if m.downloads.active {
+			switch msg.String() {
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			case "esc", "x":
+				// Exit downloads mode - return to main menu
+				m.downloads.active = false
+				m.downloads.results = nil
+				m.downloads.cursor = 0
+				m.downloads.scroll = 0
+				m.refreshCounts()
+				m.commandMenu.active = true
+				m.input.Blur()
+				return m, nil
+			case "up", "k":
+				if m.downloads.cursor > 0 {
+					m.downloads.cursor--
+					// Scroll up when cursor moves above visible window
+					cfg := m.app.Config()
+					maxVisible := cfg.MaxEpisodes
+					if maxVisible <= 0 {
+						maxVisible = 12
+					}
+					if m.downloads.cursor < m.downloads.scroll {
+						m.downloads.scroll = m.downloads.cursor
+					}
+				}
+				return m, nil
+			case "down", "j":
+				if m.downloads.cursor < len(m.downloads.results)-1 {
+					m.downloads.cursor++
+					// Scroll down when cursor moves below visible window
+					cfg := m.app.Config()
+					maxVisible := cfg.MaxEpisodes
+					if maxVisible <= 0 {
+						maxVisible = 12
+					}
+					if m.downloads.cursor >= m.downloads.scroll+maxVisible {
+						m.downloads.scroll = m.downloads.cursor - maxVisible + 1
+					}
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
 		// Handle search input mode
 		if m.searchInputMode {
 			switch msg.Type {
@@ -518,9 +613,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyEsc:
 				// Exit search input mode - return to main menu
 				m.searchInputMode = false
-				m.input.Prompt = "podsink> "
-				m.input.Placeholder = "help"
 				m.input.SetValue("")
+				m.refreshCounts()
 				m.commandMenu.active = true
 				m.input.Blur()
 				return m, nil
@@ -528,8 +622,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Execute search with the query
 				query := strings.TrimSpace(m.input.Value())
 				m.searchInputMode = false
-				m.input.Prompt = "podsink> "
-				m.input.Placeholder = "help"
 				m.input.SetValue("")
 
 				if query == "" {
@@ -541,7 +633,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				result, err := m.app.Execute(m.ctx, "search "+query)
 				if err != nil {
-					m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
+					// On error, return to command menu
+					m.commandMenu.active = true
+					m.input.Blur()
 					return m, nil
 				}
 				return m.handleCommandResult(result)
@@ -551,34 +645,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input, cmd = m.input.Update(msg)
 			return m, cmd
 		}
-
-		// Normal mode key handling
-		switch msg.Type {
-		case tea.KeyCtrlC:
-			m.quitting = true
-			return m, tea.Quit
-		case tea.KeyEnter:
-			m.completions = nil
-			m.completionIdx = 0
-			return m.handleSubmit()
-		case tea.KeyTab:
-			return m.handleTabComplete()
-		default:
-			// Reset completions on any other key
-			m.completions = nil
-			m.completionIdx = 0
-		}
 	}
 
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	return m, cmd
+	// If we reach here, no handler processed the message
+	return m, nil
 }
 
 func (m model) View() string {
 	// If in command menu mode, render the menu
 	if m.commandMenu.active {
 		return m.renderCommandMenu()
+	}
+
+	// If in search input mode, render the search input
+	if m.searchInputMode {
+		var b strings.Builder
+		b.WriteString(m.theme.Header.Render("Search for Podcasts"))
+		b.WriteString("\n")
+		b.WriteString(m.theme.Dim.Render("Enter search query (Esc to cancel):"))
+		b.WriteString("\n\n")
+		b.WriteString(m.input.View())
+		b.WriteString("\n")
+		return b.String()
 	}
 
 	// If in details mode, render the podcast details
@@ -605,17 +693,13 @@ func (m model) View() string {
 		return m.renderQueueList()
 	}
 
-	// Normal mode: render messages and input
-	var b strings.Builder
-	for _, message := range m.messages {
-		b.WriteString(message)
-		b.WriteString("\n")
+	// If in downloads mode, render the downloads list
+	if m.downloads.active {
+		return m.renderDownloadsList()
 	}
-	b.WriteString(m.input.View())
-	if !m.quitting {
-		b.WriteString("\n")
-	}
-	return b.String()
+
+	// Fallback: should not reach here, return to menu
+	return m.renderCommandMenu()
 }
 
 func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd) {
@@ -644,8 +728,8 @@ func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd
 		return m, nil
 	}
 
-	// Check if we got queued episode results
-	if len(result.QueuedEpisodeResults) > 0 {
+	// Check if we got queued episode results (even if empty)
+	if result.QueuedEpisodeResults != nil {
 		m.queue.active = true
 		m.queue.results = result.QueuedEpisodeResults
 		m.queue.cursor = 0
@@ -653,8 +737,15 @@ func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd
 		return m, nil
 	}
 
-	if result.Message != "" {
-		m.messages = append(m.messages, result.Message)
+	// Check if we got downloaded episode results (even if empty)
+	if result.DownloadedEpisodeResults != nil {
+		m.downloads.active = true
+		m.downloads.results = result.DownloadedEpisodeResults
+		m.downloads.danglingFiles = result.DanglingFiles
+		m.downloads.cursor = 0
+		m.downloads.scroll = 0
+		m.input.Blur()
+		return m, nil
 	}
 
 	if result.Quit {
@@ -662,64 +753,11 @@ func (m model) handleCommandResult(result app.CommandResult) (tea.Model, tea.Cmd
 		return m, tea.Quit
 	}
 
-	return m, nil
-}
-
-func (m model) handleSubmit() (tea.Model, tea.Cmd) {
-	command := strings.TrimSpace(m.input.Value())
-	if command != "" {
-		m.history = append(m.history, command)
-	}
-	m.input.SetValue("")
-
-	if command == "" {
-		return m, nil
-	}
-
-	result, err := m.app.Execute(m.ctx, command)
-	if err != nil {
-		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
-		return m, nil
-	}
-
-	return m.handleCommandResult(result)
-}
-
-func (m model) handleTabComplete() (tea.Model, tea.Cmd) {
-	input := m.input.Value()
-	words := strings.Fields(input)
-	if len(words) == 0 {
-		return m, nil
-	}
-
-	// Only complete the first word (command name)
-	if len(words) > 1 {
-		return m, nil
-	}
-
-	prefix := words[0]
-
-	// Build or cycle through completions
-	if m.completions == nil {
-		commandNames := m.app.CommandNames()
-		for _, name := range commandNames {
-			if strings.HasPrefix(name, prefix) {
-				m.completions = append(m.completions, name)
-			}
-		}
-		if len(m.completions) == 0 {
-			return m, nil
-		}
-		m.completionIdx = 0
-	} else {
-		// Cycle to next completion
-		m.completionIdx = (m.completionIdx + 1) % len(m.completions)
-	}
-
-	// Apply completion
-	m.input.SetValue(m.completions[m.completionIdx])
-	m.input.SetCursor(len(m.completions[m.completionIdx]))
-
+	// If we got here, the command returned a message with no special view
+	// Return to the command menu
+	m.refreshCounts()
+	m.commandMenu.active = true
+	m.input.Blur()
 	return m, nil
 }
 
@@ -739,16 +777,11 @@ func (m model) handleSearchSubscribe() (tea.Model, tea.Cmd) {
 	}
 
 	// Execute subscribe action
-	result, err := m.app.SubscribePodcast(m.ctx, podcast)
+	_, err := m.app.SubscribePodcast(m.ctx, podcast)
 
 	if err != nil {
-		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 		// Stay in current mode on error
 		return m, nil
-	}
-
-	if result.Message != "" {
-		m.messages = append(m.messages, result.Message)
 	}
 
 	// Update subscription status in the current result
@@ -792,16 +825,11 @@ func (m model) handleSearchUnsubscribe() (tea.Model, tea.Cmd) {
 	}
 
 	// Execute unsubscribe action
-	result, err := m.app.UnsubscribePodcast(m.ctx, podcast.ID)
+	_, err := m.app.UnsubscribePodcast(m.ctx, podcast.ID)
 
 	if err != nil {
-		m.messages = append(m.messages, m.theme.Error.Render(err.Error()))
 		// Stay in current mode on error
 		return m, nil
-	}
-
-	if result.Message != "" {
-		m.messages = append(m.messages, result.Message)
 	}
 
 	// Update subscription status in the current result
@@ -1011,9 +1039,30 @@ func (m model) renderEpisodeList() string {
 		maxVisible = 12
 	}
 
-	// Filter episodes if not showing all
+	// Filter episodes based on filter mode
 	visibleResults := m.episodes.results
-	if !m.episodes.showAllEpisodes {
+	if m.episodes.filterMode != "" {
+		filtered := make([]app.EpisodeResult, 0, len(m.episodes.results))
+		switch m.episodes.filterMode {
+		case "all":
+			visibleResults = m.episodes.results
+		case "ignored":
+			for _, result := range m.episodes.results {
+				if result.Episode.State == "IGNORED" {
+					filtered = append(filtered, result)
+				}
+			}
+			visibleResults = filtered
+		case "downloaded":
+			for _, result := range m.episodes.results {
+				if result.Episode.State == "DOWNLOADED" {
+					filtered = append(filtered, result)
+				}
+			}
+			visibleResults = filtered
+		}
+	} else {
+		// Default: hide ignored episodes
 		filtered := make([]app.EpisodeResult, 0, len(m.episodes.results))
 		for _, result := range m.episodes.results {
 			if result.Episode.State != "IGNORED" {
@@ -1040,8 +1089,15 @@ func (m model) renderEpisodeList() string {
 	}
 
 	// Header
-	viewMode := "All Episodes"
-	if !m.episodes.showAllEpisodes {
+	viewMode := "Episodes"
+	switch m.episodes.filterMode {
+	case "all":
+		viewMode = "All Episodes"
+	case "ignored":
+		viewMode = "Ignored Episodes"
+	case "downloaded":
+		viewMode = "Downloaded Episodes"
+	default:
 		viewMode = "Episodes (hiding ignored)"
 	}
 	if totalEpisodes > 0 {
@@ -1055,7 +1111,7 @@ func (m model) renderEpisodeList() string {
 		b.WriteString(headerStyle.Render("No episodes to display"))
 		b.WriteString("\n")
 	}
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [i] ignore, [a] toggle all, [f] fetch, [x]/Esc to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [x]/Esc to exit"))
 	b.WriteString("\n\n")
 
 	// Column abbreviation settings
@@ -1206,6 +1262,141 @@ func (m model) renderQueueList() string {
 
 		b.WriteString(line)
 		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+func (m model) renderDownloadsList() string {
+	var b strings.Builder
+
+	headerStyle := m.theme.Header
+	cursorStyle := m.theme.Cursor
+	normalStyle := m.theme.Normal
+	dimStyle := m.theme.Dim
+	dateStyle := m.theme.Date
+
+	// Calculate window bounds
+	cfg := m.app.Config()
+	maxVisible := cfg.MaxEpisodes
+	if maxVisible <= 0 {
+		maxVisible = 12
+	}
+
+	totalDownloaded := len(m.downloads.results)
+	start := m.downloads.scroll
+	end := start + maxVisible
+	if end > totalDownloaded {
+		end = totalDownloaded
+	}
+
+	// Adjust scroll if it's out of bounds
+	if start >= totalDownloaded && totalDownloaded > 0 {
+		start = 0
+		end = maxVisible
+		if end > totalDownloaded {
+			end = totalDownloaded
+		}
+	}
+
+	// Header
+	if totalDownloaded > 0 {
+		if totalDownloaded > maxVisible {
+			b.WriteString(headerStyle.Render(fmt.Sprintf("Downloaded Episodes - showing %d-%d of %d", start+1, end, totalDownloaded)))
+		} else {
+			b.WriteString(headerStyle.Render(fmt.Sprintf("Downloaded Episodes - %d total", totalDownloaded)))
+		}
+		b.WriteString("\n")
+	} else {
+		b.WriteString(headerStyle.Render("Downloaded Episodes - Empty"))
+		b.WriteString("\n")
+	}
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, [x]/Esc to return to main menu"))
+	b.WriteString("\n\n")
+
+	// Column abbreviation settings
+	podcastMaxLen := cfg.PodcastNameMaxLength
+	if podcastMaxLen <= 0 {
+		podcastMaxLen = 16
+	}
+	episodeMaxLen := cfg.EpisodeNameMaxLength
+	if episodeMaxLen <= 0 {
+		episodeMaxLen = 40
+	}
+
+	// Only render the visible window
+	for i := start; i < end; i++ {
+		result := m.downloads.results[i]
+		ep := result.Episode
+		cursor := "  "
+		style := normalStyle
+
+		if i == m.downloads.cursor {
+			cursor = "→ "
+			style = cursorStyle
+		}
+
+		// Format published date
+		published := "Unknown   "
+		if ep.HasPublish {
+			published = ep.PublishedAt.Format("2006-01-02")
+		}
+
+		// Abbreviate podcast name
+		podcastName := result.PodcastTitle
+		if podcastName == "" {
+			podcastName = "Unknown"
+		}
+		if len(podcastName) > podcastMaxLen {
+			podcastName = podcastName[:podcastMaxLen-3] + "..."
+		}
+		// Pad to fixed width for alignment
+		podcastName = fmt.Sprintf("%-*s", podcastMaxLen, podcastName)
+
+		// Abbreviate episode title
+		episodeTitle := ep.Title
+		if len(episodeTitle) > episodeMaxLen {
+			episodeTitle = episodeTitle[:episodeMaxLen-3] + "..."
+		}
+
+		// Format size in MB
+		var sizeStr string
+		if ep.SizeBytes > 0 {
+			sizeMB := float64(ep.SizeBytes) / (1024 * 1024)
+			sizeStr = fmt.Sprintf("%6.1f MB", sizeMB)
+		} else {
+			sizeStr = "       --"
+		}
+
+		// Add state indicator (DOWNLOADED vs DELETED)
+		stateIndicator := ""
+		if ep.State == "DELETED" {
+			stateIndicator = " [DELETED]"
+		}
+
+		// Format: → DATE PODCAST_NAME EPISODE_TITLE SIZE [DELETED]
+		line := cursor + dateStyle.Render(published) + " " +
+			dimStyle.Render(podcastName) + " " + style.Render(episodeTitle) + " " +
+			dimStyle.Render(sizeStr) + dimStyle.Render(stateIndicator)
+
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	// Display dangling files section if any
+	if len(m.downloads.danglingFiles) > 0 {
+		b.WriteString("\n")
+		b.WriteString(headerStyle.Render(fmt.Sprintf("Dangling Files - %d untracked file(s)", len(m.downloads.danglingFiles))))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("Files in download directory not tracked in database:"))
+		b.WriteString("\n\n")
+
+		for _, file := range m.downloads.danglingFiles {
+			sizeMB := float64(file.SizeBytes) / (1024 * 1024)
+			line := dimStyle.Render("  ") + normalStyle.Render(file.Path) + " " + dimStyle.Render(fmt.Sprintf("(%6.1f MB)", sizeMB))
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
 	}
 
 	return b.String()
@@ -1444,6 +1635,17 @@ func wrapLine(line string, width int) []string {
 	return result
 }
 
+func (m *model) refreshCounts() {
+	// Fetch queue count
+	if count, err := m.app.CountQueued(m.ctx); err == nil {
+		m.queueCount = count
+	}
+	// Fetch downloads count
+	if count, err := m.app.CountDownloaded(m.ctx); err == nil {
+		m.downloadsCount = count
+	}
+}
+
 func (m model) renderCommandMenu() string {
 	var b strings.Builder
 
@@ -1454,7 +1656,7 @@ func (m model) renderCommandMenu() string {
 
 	b.WriteString(headerStyle.Render("Podsink - Podcast Manager"))
 	b.WriteString("\n")
-	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ueue [c]onfig, ESC/[x] to exit"))
+	b.WriteString(dimStyle.Render("Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ueue [d]ownloads [c]onfig, ESC/[x] to exit"))
 	b.WriteString("\n\n")
 
 	for i, item := range m.commandMenu.items {
@@ -1474,7 +1676,15 @@ func (m model) renderCommandMenu() string {
 			shorthand = shorthand + " "
 		}
 
-		line := cursor + dimStyle.Render(shorthand) + style.Render(item.usage)
+		// Add counts for queue and downloads
+		usage := item.usage
+		if item.name == "queue" && m.queueCount > 0 {
+			usage = fmt.Sprintf("%s (%d)", item.usage, m.queueCount)
+		} else if item.name == "downloads" && m.downloadsCount > 0 {
+			usage = fmt.Sprintf("%s (%d)", item.usage, m.downloadsCount)
+		}
+
+		line := cursor + dimStyle.Render(shorthand) + style.Render(usage)
 		b.WriteString(line)
 		b.WriteString("\n")
 	}

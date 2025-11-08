@@ -62,6 +62,11 @@ func main() {
 	application := app.New(cfg, configPath, db)
 	defer application.Close()
 
+	// Initialize and correct database state
+	if err := application.Initialize(ctx); err != nil {
+		log.Fatalf("failed to initialize application: %v", err)
+	}
+
 	if *importOPML != "" && *exportOPML != "" {
 		fmt.Fprintln(os.Stderr, "error: --import-opml and --export-opml cannot be used together")
 		os.Exit(1)

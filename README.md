@@ -1,16 +1,18 @@
 # Podsink
 
-**Podsink** is a command-line tool for discovering, subscribing to, and downloading podcast episodes. It provides a REPL-style interactive interface with persistent state management via SQLite.
+**Podsink** is a command-line tool for discovering, subscribing to, and downloading podcast episodes. It provides a menu-driven interactive interface with persistent state management via SQLite.
 
 ## Features
 
 - **Search & Subscribe**: Find podcasts using the iTunes Search API
 - **Episode Management**: View, queue, and download episodes with state tracking
 - **Concurrent Downloads**: Configurable parallel downloads with retry logic and resume support
+- **State Auto-Correction**: Automatically fixes episodes stuck in QUEUED state on startup
+- **Dangling File Detection**: Identifies files in download directory not tracked in database
 - **OPML Support**: Import and export subscriptions for portability
 - **Data Integrity**: SHA256 hash verification prevents unnecessary re-downloads
 - **Secure**: HTTPS-only with TLS verification, optional proxy support
-- **Interactive CLI**: Tab-completion for commands, intuitive REPL interface
+- **Interactive CLI**: Navigable menu interface with keyboard shortcuts and live counts
 - **Persistent Storage**: SQLite database with automatic schema management
 - **Rotating Logs**: Structured logging with automatic rotation (10 MB × 3 files)
 
@@ -52,82 +54,113 @@ Configuration files created:
 
 ### Basic Usage
 
-Once in the REPL, you can use the following commands:
+The application starts with a navigable main menu:
 
 ```
-podsink> search
+Podsink - Podcast Manager
+Use ↑↓/jk to navigate, Enter to select, [s]earch [p]odcasts [e]pisodes [q]ueue [d]ownloads [c]onfig, ESC/[x] to exit
+
+  → [s] search
+    [p] podcasts
+    [e] episodes
+    [q] queue
+    [d] downloads
+    [c] config [show]
+    [x] exit
+```
+
+**Navigation:**
+- Use ↑↓ or j/k to move through menu items
+- Press Enter or use keyboard shortcuts (s/p/e/q/d/c/x) to select an option
+- Press ESC or x to exit from any submenu back to the main menu
+
+**Search:** Press `s` or select "search" to enter a search query. Type your query and press Enter to see results.
+```
+Search for Podcasts
+Enter search query (Esc to cancel):
+
 search> golang
-# Enter search mode, type your query, and press Enter. An interactive list appears.
-# Use ↑↓/jk to navigate results, Enter for details, press "s" to subscribe,
-# or "u" to unsubscribe. The same view is used when browsing your subscriptions.
+```
+Results appear in an interactive list. Use ↑↓/jk to navigate, Enter for details, `s` to subscribe, or `u` to unsubscribe.
 
-podsink> list subscriptions
-# Shows all subscribed podcasts in the interactive list. Use "u" to unsubscribe
-# from the highlighted podcast or Enter to view details.
+**List Subscriptions:** Press `p` or select "podcasts" to view all subscribed podcasts.
 
-podsink> episodes
+**View Episodes:** Press `e` or select "episodes" to browse recent episodes:
+```
 Episodes (hiding ignored) (Newest First) - showing 1-12 of 147:
-Use ↑↓/jk to navigate, Enter for details, [i] ignore, [a] toggle all, [f] fetch, [x]/Esc to exit
+Use ↑↓/jk to navigate, Enter for details, [i] ignore, [A] all, [I] ignored, [D] downloaded, [d] download, [x]/Esc to exit
 
   → 2025-01-15 Go Time          Building Better Go APIs                45.2 MB
     2025-01-08 Go Time          Concurrency Patterns                    52.8 MB
-# Navigate with ↑↓/jk; [i] to ignore; [a] to toggle showing all; [f] to queue for download
+```
+Navigate with ↑↓/jk; press `i` to ignore; `[A]` to show all, `[I]` for ignored only, `[D]` for downloaded only; `d` to queue for download.
 
-podsink> queue
+**View Queue:** Press `q` or select "queue" to see download queue:
+```
 Download Queue - 2 episode(s)
 Use ↑↓/jk to navigate, [x]/Esc to return to main menu
 
   → 2025-01-15 Go Time          Building Better Go APIs                Queued
     2025-01-08 Go Time          Concurrency Patterns                    Queued
-
-podsink> help
-Available commands:
-  help [command]              Show information about available commands
-  config [show]               View or edit application configuration
-  search                      Search for podcasts via the iTunes API (enters search mode)
-  list subscriptions          List all podcast subscriptions
-  episodes                    View recent episodes across subscriptions (aliases: e, le)
-  queue [episode_id]          View download queue status or queue an episode
-  exit                        Exit the application
 ```
 
-To import or export subscriptions without entering the REPL, use the command-line
+To import or export subscriptions without entering the interactive menu, use the command-line
 flags `--import-opml <file>` or `--export-opml <file>`.
 
-## Commands Reference
+## Menu Reference
 
-### Discovery & Subscription Management
+### Main Menu Options
 
-- `search` - Enter search mode with `search>` prompt; type query and press Enter to search for podcasts using iTunes API (interactive results support subscribing/unsubscribing)
-- `list subscriptions` - Browse all subscriptions in the interactive list (unsubscribe directly or open details)
+- **Search** `[s]` - Search for podcasts using the iTunes Search API
+  - Enter a search query to find podcasts
+  - Navigate results with ↑↓/jk
+  - Press `s` to subscribe, `u` to unsubscribe
+  - Press `x` or ESC to return to main menu
 
-### Episode Management
+- **Podcasts** `[p]` - Browse all subscriptions
+  - View all subscribed podcasts with episode counts
+  - Navigate with ↑↓/jk
+  - Press Enter for podcast details
+  - Press `u` to unsubscribe
+  - Press `x` or ESC to return to main menu
 
-- `episodes` - Browse all recorded episodes (newest first) across your subscriptions with scrolling support
-  - Interactive keybindings: `[i]` ignore, `[a]` toggle showing all, `[f]` queue for download
-  - Episodes displayed in columnar format: DATE | PODCAST_NAME | EPISODE_TITLE | SIZE (in MB)
-  - Ignored episodes are hidden by default; press `[a]` to toggle
-- `queue` - View download queue with status (queued, error with retry count)
-  - Shows all episodes currently queued for background download
-  - Displays enqueued date, podcast name, episode title, and download status
-  - Use `queue <episode_id>` to add an episode to the queue
-- `download <episode_id>` - Download episode immediately in foreground (available via command line)
-- `ignore <episode_id>` - Toggle ignore state for an episode (available via command line)
+- **Episodes** `[e]` - Browse all recorded episodes (newest first)
+  - Navigate with ↑↓/jk
+  - Press Enter to view episode details
+  - Press `i` to ignore/unignore an episode
+  - Press `[A]` to show all episodes
+  - Press `[I]` to show only ignored episodes
+  - Press `[D]` to show only downloaded episodes
+  - Press `d` to queue episode for download
+  - Press `x` or ESC to return to main menu
+  - Episodes displayed as: DATE | PODCAST_NAME | EPISODE_TITLE | SIZE (MB)
 
-### Import/Export
+- **Queue** `[q]` - View download queue
+  - Shows both queued and downloaded episodes (until explicitly removed)
+  - Displays count of queued episodes in main menu (e.g., "queue (3)")
+  - Navigate with ↑↓/jk
+  - Displays status (queued, error with retry count)
+  - Press `x` or ESC to return to main menu
 
-- `--import-opml <file_path>` - Import subscriptions from OPML file without starting the REPL
-- `--export-opml <file_path>` - Export subscriptions to OPML format without starting the REPL
+- **Downloads** `[d]` - View all downloaded episodes
+  - Shows episodes with DOWNLOADED or DELETED state
+  - Automatically detects and marks episodes with missing files as DELETED
+  - Displays count of downloaded episodes in main menu (e.g., "downloads (15)")
+  - Shows dangling files section: files in download directory not tracked in database
+  - Navigate with ↑↓/jk
+  - Deleted files are marked with [DELETED] indicator
+  - Press `x` or ESC to return to main menu
 
-### Configuration
+- **Config** `[c]` - Configuration management
+  - Interactive configuration editor
+  - Modify settings like download directory, parallel downloads, themes, etc.
 
-- `config` - Interactive configuration editor
-- `config show` - Display current configuration
+- **Exit** `[x]` - Exit the application
 
-### General
+### Import/Export (Command-line only)
 
-- `help [command]` - Show help for all commands or a specific command
-- `exit` (or `quit`) - Exit the application
+- `--import-opml <file_path>` - Import subscriptions from OPML file without starting the menu
+- `--export-opml <file_path>` - Export subscriptions to OPML format without starting the menu
 
 ## Configuration
 
@@ -163,26 +196,21 @@ Episodes progress through the following states:
 - **IGNORED** - User has hidden the episode
 - **QUEUED** - Queued for background download
 - **DOWNLOADED** - Successfully downloaded
+- **DELETED** - Downloaded but file no longer exists on filesystem
 
 ## Advanced Features
 
 ### Concurrent Downloads
 
 Configure `parallel_downloads` to enable background downloading:
-
-```bash
-podsink> config
-# Set parallel_downloads to 4 (or your preferred number)
-```
+- Select **Config** from the main menu (press `c`)
+- Set parallel_downloads to 4 (or your preferred number)
 
 Queue multiple episodes and they'll download concurrently:
-
-```bash
-podsink> queue ep-001
-podsink> queue ep-002
-podsink> queue ep-003
-# Downloads happen in background workers
-```
+- Navigate to **Episodes** (press `e`)
+- Use ↑↓/jk to select episodes
+- Press `d` to queue each episode for download
+- Downloads happen automatically in background workers
 
 ### Resume Support
 
@@ -242,7 +270,7 @@ Podsink follows a clean layered architecture:
 - **cmd/podsink** - Application entry point
 - **internal/app** - Core business logic and command handlers
 - **internal/config** - Configuration management
-- **internal/repl** - Interactive REPL interface (Bubble Tea)
+- **internal/repl** - Interactive menu interface (Bubble Tea)
 - **internal/storage** - SQLite database layer
 - **internal/feeds** - RSS feed parsing
 - **internal/itunes** - iTunes Search API integration
